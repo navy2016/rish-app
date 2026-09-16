@@ -5,6 +5,8 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <Security/Security.h>
 
+#include "rish_agent_core.h"
+
 #include <ctype.h>
 #include <math.h>
 #include <stdint.h>
@@ -153,6 +155,43 @@ static NSString *DSHFoldedString(NSString *value) {
                kCFCompareCaseInsensitive,
                NULL);
   return DSHNFCString(folded);
+}
+
+// chat-read-v1's path tables live in the shared core (modules/rish/core,
+// `rish_agent_project_context_reduce`): which directory, name or extension is
+// a secret, generated output, a lockfile or a binary, and the order those are
+// consulted in. A path that stops being recognised as sensitive is a secret
+// sent to a provider, so there is one copy of that table.
+//
+// Case folding stays here. Foundation folds with CFStringFold, which is
+// Unicode case *folding* — not lowercasing — and the core carries no folding
+// table; the same shape as the foundation-json-v1 projection. So this side
+// folds, exactly as it always did, and passes the folded spellings across.
+static NSDictionary *DSHPolicyReduce(NSString *op, NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_project_context_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
+/// One component as the core needs to see it: folded, plus the two Foundation
+/// path operations applied to the folded spelling.
+static NSDictionary *DSHFoldedComponent(NSString *component) {
+  NSString *folded = DSHFoldedString(component);
+  return @{
+    @"folded" : folded,
+    @"extension" : folded.pathExtension ?: @"",
+    @"stem" : folded.stringByDeletingPathExtension ?: @"",
+  };
 }
 
 static BOOL DSHRelativePathHasSafeStructure(NSString *normalizedPath) {
@@ -2158,6 +2197,10 @@ static NSComparisonResult DSHCompareCandidates(NSDictionary<NSString *, id> *lef
 }
 
 - (DSHProjectContextPathDecision *)decisionForRelativePath:(NSString *)relativePath {
+  // The bound is decided on the reported length alone, before a single
+  // character is read: normalizing first would do work proportional to a
+  // hostile input that is about to be refused anyway. The core bounds it too,
+  // but by then the copy has already happened, so this check stays here.
   if (![relativePath isKindOfClass:NSString.class] || relativePath.length == 0 ||
       relativePath.length > DSHProjectContextMaxRelativePathCharacters) {
     return [[DSHProjectContextPathDecision alloc]
@@ -2166,65 +2209,31 @@ static NSComparisonResult DSHCompareCandidates(NSDictionary<NSString *, id> *lef
                 omissionReason:DSHProjectContextOmissionReasonPolicy];
   }
   NSString *normalized = DSHNFCString(relativePath);
-  if (!DSHRelativePathHasSafeStructure(normalized)) {
+  NSMutableArray *components = [NSMutableArray array];
+  for (NSString *component in [normalized componentsSeparatedByString:@"/"]) {
+    [components addObject:DSHFoldedComponent(component)];
+  }
+  NSString *filename = [normalized componentsSeparatedByString:@"/"].lastObject ?: @"";
+  NSDictionary *reply = DSHPolicyReduce(@"path_decision", @{
+    @"path" : relativePath,
+    @"normalized" : normalized,
+    @"components" : components,
+    @"filename" : DSHFoldedComponent(filename),
+    // The extension is folded *after* Foundation takes it, which is how this
+    // policy has always spelled it.
+    @"filename_extension" : DSHFoldedString(filename.pathExtension ?: @""),
+  });
+  if (reply == nil) {
     return [[DSHProjectContextPathDecision alloc]
         initWithNormalizedPath:normalized
                      eligible:NO
                 omissionReason:DSHProjectContextOmissionReasonPolicy];
   }
-
-  NSArray<NSString *> *components = [normalized componentsSeparatedByString:@"/"];
-  for (NSString *component in components) {
-    NSString *folded = DSHFoldedString(component);
-    if (DSHIsSensitivePathComponent(folded)) {
-      return [[DSHProjectContextPathDecision alloc]
-          initWithNormalizedPath:normalized
-                       eligible:NO
-                  omissionReason:DSHProjectContextOmissionReasonSecretPath];
-    }
-    if ([DSHGeneratedDirectories() containsObject:folded]) {
-      return [[DSHProjectContextPathDecision alloc]
-          initWithNormalizedPath:normalized
-                       eligible:NO
-                  omissionReason:DSHProjectContextOmissionReasonGenerated];
-    }
-  }
-
-  NSString *filename = components.lastObject;
-  NSString *foldedFilename = DSHFoldedString(filename);
-  NSString *extension = DSHFoldedString(filename.pathExtension);
-  if (DSHIsSensitiveFilename(foldedFilename) ||
-      [DSHSensitiveExtensions() containsObject:extension]) {
-    return [[DSHProjectContextPathDecision alloc]
-        initWithNormalizedPath:normalized
-                     eligible:NO
-                omissionReason:DSHProjectContextOmissionReasonSecretPath];
-  }
-  if (DSHIsLockfile(foldedFilename)) {
-    return [[DSHProjectContextPathDecision alloc]
-        initWithNormalizedPath:normalized
-                     eligible:NO
-                omissionReason:DSHProjectContextOmissionReasonLockfile];
-  }
-  if ([extension isEqualToString:@"map"] ||
-      [foldedFilename containsString:@".min."] ||
-      [foldedFilename hasSuffix:@".bundle.js"] ||
-      [foldedFilename hasSuffix:@".bundle.css"] ||
-      [DSHBinaryExtensions() containsObject:extension]) {
-    return [[DSHProjectContextPathDecision alloc]
-        initWithNormalizedPath:normalized
-                     eligible:NO
-                omissionReason:DSHProjectContextOmissionReasonBinary];
-  }
-  if (!DSHIsSafeBasename(foldedFilename) &&
-      ![DSHAllowedTextExtensions() containsObject:extension]) {
-    return [[DSHProjectContextPathDecision alloc]
-        initWithNormalizedPath:normalized
-                     eligible:NO
-                omissionReason:DSHProjectContextOmissionReasonPolicy];
-  }
+  id reason = reply[@"omission_reason"];
   return [[DSHProjectContextPathDecision alloc]
-      initWithNormalizedPath:normalized eligible:YES omissionReason:nil];
+      initWithNormalizedPath:reply[@"normalized_path"] ?: normalized
+                   eligible:[reply[@"eligible"] isEqual:@YES]
+              omissionReason:[reason isKindOfClass:NSString.class] ? reason : nil];
 }
 
 - (DSHProjectContextContentDecision *)decisionForContentData:(NSData *)data {

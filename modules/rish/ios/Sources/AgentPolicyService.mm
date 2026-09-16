@@ -5,6 +5,8 @@
 #import "AgentToolRegistry.h"
 #import "SessionWorkspaceCoordinator.h"
 
+#include "rish_agent_core.h"
+
 NSErrorDomain const DSHAgentPolicyErrorDomain = @"tech.zseven.rish.agent-policy";
 static const NSUInteger DSHPolicyMaximumSafeInteger = 9007199254740991ULL;
 
@@ -42,33 +44,39 @@ static NSError *DSHPolicyMapRootError(NSError *error) {
   return DSHPolicyError(@"E_AGENT_NATIVE");
 }
 
+// The describe result is a *safe* projection: it is handed to the JavaScript
+// layer and shown in the UI, so what matters is not what it contains but what
+// it must never contain — a filesystem path, the native descriptor table, tool
+// arguments, or anything that could be mistaken for an authority handle. Its
+// keys are enumerated in the shared core (modules/rish/core,
+// `rish_agent_policy_reduce`) rather than copied from the inputs, and an
+// accidental extra key is a leak.
+static NSDictionary *DSHPolicyReduce(NSString *op, NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_policy_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
 static BOOL DSHPolicyValidRequest(id request) {
-  return DSHAgentExactDictionaryKeys(request, @[
-      @"schema_version", @"workspace_id", @"workspace_binding_revision", @"project_id",
-    ]) &&
-    DSHAgentSafeInteger(request[@"schema_version"], 1, NO) &&
-    [request[@"schema_version"] isEqual:@1] &&
-    DSHAgentCanonicalUUID(request[@"workspace_id"]) &&
-    DSHAgentSafeInteger(request[@"workspace_binding_revision"],
-                         DSHPolicyMaximumSafeInteger, NO) &&
-    (request[@"project_id"] == NSNull.null ||
-      DSHAgentCanonicalUUID(request[@"project_id"]));
+  if (![request isKindOfClass:NSDictionary.class]) return NO;
+  return [DSHPolicyReduce(@"request_shape",
+                          @{ @"request" : request })[@"valid"] isEqual:@YES];
 }
 
 static BOOL DSHPolicyValidBudget(NSDictionary *policy) {
-  return DSHAgentExactDictionaryKeys(policy, @[
-      @"schema_version", @"policy_version", @"max_single_write_bytes",
-      @"max_batch_write_bytes", @"max_attempt_write_bytes",
-    ]) &&
-    DSHAgentSafeInteger(policy[@"schema_version"], 1, NO) &&
-    [policy[@"policy_version"] isEqual:@"agent-v1"] &&
-    DSHAgentSafeInteger(policy[@"max_single_write_bytes"], DSHPolicyMaximumSafeInteger, NO) &&
-    DSHAgentSafeInteger(policy[@"max_batch_write_bytes"], DSHPolicyMaximumSafeInteger, NO) &&
-    DSHAgentSafeInteger(policy[@"max_attempt_write_bytes"], DSHPolicyMaximumSafeInteger, NO) &&
-    [policy[@"max_single_write_bytes"] unsignedLongLongValue] <=
-      [policy[@"max_batch_write_bytes"] unsignedLongLongValue] &&
-    [policy[@"max_batch_write_bytes"] unsignedLongLongValue] <=
-      [policy[@"max_attempt_write_bytes"] unsignedLongLongValue];
+  if (![policy isKindOfClass:NSDictionary.class]) return NO;
+  return [DSHPolicyReduce(@"budget_shape",
+                          @{ @"policy" : policy })[@"valid"] isEqual:@YES];
 }
 
 @interface DSHAgentPolicyService ()
@@ -118,10 +126,13 @@ static BOOL DSHPolicyValidBudget(NSDictionary *policy) {
       *inner = DSHPolicyMapRootError(nativeError);
       return NO;
     }
+    // A resolver that answered for a different workspace, revision or project
+    // answered a different question, and the display would be about something
+    // else.
     if (![DSHAgentRootResolver validateAgentRootProjection:root error:nil] ||
-        ![root[@"workspace_id"] isEqual:identity[@"workspace_id"]] ||
-        ![root[@"workspace_binding_revision"] isEqual:identity[@"workspace_binding_revision"]] ||
-        ![root[@"project_id"] isEqual:identity[@"project_id"]]) {
+        ![DSHPolicyReduce(@"root_matches_request", @{
+            @"root" : root, @"request" : identity,
+          })[@"matches"] isEqual:@YES]) {
       *inner = DSHPolicyError(@"E_AGENT_ROOT_STALE");
       return NO;
     }
@@ -136,29 +147,14 @@ static BOOL DSHPolicyValidBudget(NSDictionary *policy) {
       *inner = DSHPolicyMapRootError(nativeError);
       return NO;
     }
-    NSMutableArray *tools = [NSMutableArray array];
-    for (NSDictionary *tool in registry[@"tools"]) {
-      [tools addObject:@{@"name": tool[@"name"], @"access": tool[@"access"]}];
+    result = DSHPolicyReduce(@"projection", @{
+      @"request" : identity, @"root" : root,
+      @"registry" : registry, @"policy" : policy,
+    })[@"result"];
+    if (result == nil) {
+      *inner = DSHPolicyError(@"E_AGENT_NATIVE");
+      return NO;
     }
-    // Enumerate output keys explicitly: never return paths, native descriptor
-    // tables, arguments or authority handles. The root digest lets UI reject
-    // stale grant displays; it grants no execution authority.
-    result = @{
-      @"schema_version": @1,
-      @"workspace_id": identity[@"workspace_id"],
-      @"workspace_binding_revision": identity[@"workspace_binding_revision"],
-      @"project_id": identity[@"project_id"],
-      @"registry_version": registry[@"registry_version"],
-      @"root_fingerprint_sha256": root[@"root_fingerprint_sha256"],
-      @"policy_version": policy[@"policy_version"],
-      @"capabilities": [root[@"capabilities"] copy],
-      @"tools": [tools copy],
-      @"budget": @{
-        @"max_single_write_bytes": policy[@"max_single_write_bytes"],
-        @"max_batch_write_bytes": policy[@"max_batch_write_bytes"],
-        @"max_attempt_write_bytes": policy[@"max_attempt_write_bytes"],
-      },
-    };
     return YES;
   } error:&transactionError];
   if (!completed || result == nil) {

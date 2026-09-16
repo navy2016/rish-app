@@ -9,6 +9,11 @@ static const NSUInteger LogLimit = 256 * 1024;
 static const NSUInteger ChunkBytes = 2250;
 static const NSUInteger QueueLimit = 8;
 static const NSTimeInterval RequestSeconds = 30;
+// Supervision runs a tiny shell command, but the guest is an emulated x86 core.
+// A program that compiles or warms up saturates that core, and a spawn that
+// costs milliseconds natively can then cost seconds. This bounds a wedged
+// guest; it is not a health signal, so it stays far above the honest cost.
+static const NSTimeInterval SuperviseSeconds = 45;
 
 @interface DSHRuntimeServiceRequest : NSObject
 @property(nonatomic, copy) NSData *request;
@@ -41,6 +46,12 @@ static NSTimeInterval Now(void) { return NSProcessInfo.processInfo.systemUptime;
 static BOOL Fail(NSError **error, NSString *code) {
   if (error) *error = DSHRuntimeProgramError(code);
   return NO;
+}
+
+// Only a missed supervision deadline is transient. Every other failure states
+// something the caller must act on, and must never be waited out.
+static BOOL Transient(NSError *error) {
+  return [error.userInfo[@"code"] isEqual:@"E_PROGRAM_TIMEOUT"];
 }
 
 static BOOL LooksLikeHTTP(NSData *bytes) {
@@ -182,7 +193,8 @@ static BOOL ValidArgs(id value) {
   NSMutableArray *argv = [NSMutableArray arrayWithArray:@[@"/bin/sh", @"-c", script, @"sh", root]];
   [argv addObjectsFromArray:@[@"/bin/busybox", @"env", [@"PORT=" stringByAppendingString:@(port).stringValue], @"HOST=127.0.0.1"]];
   [argv addObjectsFromArray:command];
-  NSDictionary *reply = [self executeSession:session command:argv deadline:Now() + 30 limit:4096 stdout:nil error:error];
+  NSDictionary *reply = [self executeSession:session command:argv deadline:Now() + SuperviseSeconds
+      limit:4096 stdout:nil error:error];
   if (!reply) return NO;
   return [reply[@"exit_code"] integerValue] == 0 ? YES : Fail(error, @"E_PROGRAM_EXEC");
 }
@@ -195,7 +207,7 @@ static BOOL ValidArgs(id value) {
       "state=; if test -r \"/proc/$pid/status\"; then "
       "while read -r key value rest; do test \"$key\" != State: || state=$value; done < \"/proc/$pid/status\"; fi; "
       "case \"$state\" in ''|Z|X) printf '255';; *) printf 'running';; esac; fi", @"sh", root]
-      deadline:Now() + 5 limit:4096 stdout:&bytes error:error];
+      deadline:Now() + SuperviseSeconds limit:4096 stdout:&bytes error:error];
   if (!reply) return nil;
   if ([reply[@"exit_code"] integerValue] != 0) { Fail(error, @"E_PROGRAM_EXEC"); return nil; }
   NSString *value = [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
@@ -216,7 +228,7 @@ static BOOL ValidArgs(id value) {
     NSDictionary *reply = [self executeSession:session command:@[@"/bin/sh", @"-c",
         @"if test -f \"$1\"; then tail -c \"+$2\" \"$1\"; fi", @"sh",
         [root stringByAppendingFormat:@"/%@.log", name], @(offset + 1).stringValue]
-        deadline:Now() + 5 limit:LogLimit stdout:&data error:error];
+        deadline:Now() + SuperviseSeconds limit:LogLimit stdout:&data error:error];
     if (!reply) return NO;
     if ([reply[@"exit_code"] integerValue] != 0) return Fail(error, @"E_PROGRAM_EXEC");
     offsets[name] = @(offset + data.length);
@@ -254,13 +266,28 @@ static BOOL ValidArgs(id value) {
         NSError *failure = nil;
         NSData *response = [self forwardRequest:probe path:requestPath port:port session:session deadline:deadline error:&failure];
         if (response) { listening = YES; probeResponse = response; break; }
-        if (![failure.userInfo[@"code"] isEqual:@"E_PROGRAM_EXEC"]) { *inner = failure; return nil; }
-        NSNumber *status = [self exitStatus:root session:session error:inner];
-        if (*inner) return nil;
+        if (![failure.userInfo[@"code"] isEqual:@"E_PROGRAM_EXEC"]) {
+          [self readLogs:root session:session offsets:offsets output:output error:nil];
+          *inner = failure; return nil;
+        }
+        NSError *supervision = nil;
+        NSNumber *status = [self exitStatus:root session:session error:&supervision];
+        if (supervision) {
+          // The program compiling ahead of its first listen is the normal case
+          // here, and it is exactly when supervision misses its deadline. One
+          // missed probe says nothing; the overall deadline still ends the wait.
+          if (!Transient(supervision)) { *inner = supervision; return nil; }
+          continue;
+        }
         if (status) { [self readLogs:root session:session offsets:offsets output:output error:nil];
           *inner = DSHRuntimeProgramError(@"E_PROGRAM_EXEC"); return nil; }
       }
-      if (!listening) { if (!self.cancelled) Fail(inner, @"E_PROGRAM_TIMEOUT"); return nil; }
+      if (!listening) {
+        if (self.cancelled) return nil;
+        // A start that never listened is otherwise reported with no evidence.
+        [self readLogs:root session:session offsets:offsets output:output error:nil];
+        Fail(inner, @"E_PROGRAM_TIMEOUT"); return nil;
+      }
       [self.condition lock]; self.serving = !self.cancelled; [self.condition unlock];
       if (self.cancelled) return nil;
       ready(probeResponse);
@@ -281,9 +308,13 @@ static BOOL ValidArgs(id value) {
         }
         if (self.cancelled) break;
         if (Now() >= nextStatus) {
-          NSNumber *status = [self exitStatus:root session:session error:inner];
-          if (*inner || ![self readLogs:root session:session offsets:offsets output:output error:inner]) return nil;
-          if (status) return status;
+          NSError *supervision = nil;
+          NSNumber *status = [self exitStatus:root session:session error:&supervision];
+          if (!supervision) [self readLogs:root session:session offsets:offsets output:output error:&supervision];
+          // A service under load misses these deadlines too. Ending a run the
+          // caller is still using would turn host slowness into program failure.
+          if (supervision && !Transient(supervision)) { *inner = supervision; return nil; }
+          if (!supervision && status) return status;
           nextStatus = Now() + 0.5;
         }
       }

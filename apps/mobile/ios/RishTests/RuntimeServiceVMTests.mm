@@ -19,6 +19,10 @@
 @property(nonatomic) NSUInteger scopes;
 @property(nonatomic) BOOL scopeReturned;
 @property(nonatomic, copy) NSString *forwardError;
+@property(nonatomic) NSUInteger refusals;
+@property(nonatomic) NSUInteger statusTimeouts;
+@property(nonatomic) NSUInteger statusChecks;
+@property(nonatomic, copy) NSString *statusError;
 @end
 @implementation DSHServiceTestVM
 - (instancetype)init {
@@ -49,11 +53,20 @@
     [self.staged appendData:data];
   } else if ([script hasPrefix:@"exec /bin/busybox nc"]) {
     self.forwards++;
+    // A program that has not bound its port yet refuses the probe.
+    if (self.forwards <= self.refusals) {
+      if (error) *error = DSHRuntimeProgramError(@"E_PROGRAM_EXEC"); return nil;
+    }
     if (self.forwards > 1 && self.forwardError) {
       if (error) *error = DSHRuntimeProgramError(self.forwardError); return nil;
     }
     if (stdoutData) *stdoutData = self.response;
   } else if ([script hasPrefix:@"if test -s"]) {
+    self.statusChecks++;
+    if (self.statusError) { if (error) *error = DSHRuntimeProgramError(self.statusError); return nil; }
+    if (self.statusChecks <= self.statusTimeouts) {
+      if (error) *error = DSHRuntimeProgramError(@"E_PROGRAM_TIMEOUT"); return nil;
+    }
     if (stdoutData) *stdoutData = [@"running" dataUsingEncoding:NSUTF8StringEncoding];
   } else if (stdoutData) *stdoutData = NSData.data;
   return @{@"exit_code":@0};
@@ -160,6 +173,31 @@
     XCTAssertEqualObjects(replyError.userInfo[@"code"], code);
     XCTAssertEqualObjects(error.userInfo[@"code"], code); XCTAssertTrue(vm.scopeReturned);
   }
+}
+- (void)testCompilingProgramSurvivesSupervisionDeadlinesItsOwnLoadCaused {
+  // The guest is an emulated core. Compiling ahead of the first listen
+  // saturates it, which is exactly when supervision misses its deadline. That
+  // says nothing about the program, so it must not end the start.
+  DSHServiceTestVM *vm = [[DSHServiceTestVM alloc] init];
+  vm.refusals = 3; vm.statusTimeouts = 3;
+  __block BOOL ready = NO; NSError *error = nil;
+  [vm serveLease:[self lease:@"go"] snapshot:(id)nil entryPath:@"go.go" args:@[@"8080"] guestPort:8080
+      ready:^(__unused NSData *probe) { ready = YES; [vm cancel]; }
+      output:^(__unused NSString *channel, __unused NSData *data) {} error:&error];
+  XCTAssertTrue(ready, @"Transient supervision timeouts ended a start that was still compiling.");
+  XCTAssertNil(error);
+  XCTAssertEqual(vm.forwards, 4U); XCTAssertGreaterThanOrEqual(vm.statusChecks, 3U);
+}
+- (void)testSupervisionFailureThatIsNotADeadlineStillEndsTheStart {
+  DSHServiceTestVM *vm = [[DSHServiceTestVM alloc] init];
+  vm.refusals = 1; vm.statusError = @"E_PROGRAM_OUTPUT_LIMIT";
+  __block BOOL ready = NO; NSError *error = nil;
+  XCTAssertNil([vm serveLease:[self lease:@"go"] snapshot:(id)nil entryPath:@"go.go" args:@[@"8080"]
+      guestPort:8080 ready:^(__unused NSData *probe) { ready = YES; [vm cancel]; }
+      output:^(__unused NSString *channel, __unused NSData *data) {} error:&error]);
+  XCTAssertFalse(ready);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_PROGRAM_OUTPUT_LIMIT");
+  XCTAssertTrue(vm.scopeReturned);
 }
 - (void)testCancellationFromAnotherThreadWakesTheIdleService {
   DSHServiceTestVM *vm = [[DSHServiceTestVM alloc] init];

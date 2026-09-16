@@ -867,6 +867,68 @@ values are pinned in the core's tests — a change to the table changes them and
 invalidates every authority on every device, which is exactly the kind of
 change that should be hard to make by accident.
 
+### What a person is told the agent may do
+
+`AgentPolicyService`'s describe result is a *safe projection*: it is handed to
+the JavaScript layer and shown in the UI, so the interesting property is not
+what it contains but what it must never contain — a filesystem path, the native
+descriptor table, tool arguments, or anything that could be mistaken for an
+authority handle. `agent_policy.rs` enumerates its keys rather than copying
+them from the inputs, and a test feeds it a registry carrying an absolute path,
+a parameter schema, an arguments string and the toolset digest, then asserts
+none of them reach the output.
+
+Three rules moved with it:
+
+- the request shape (exact keys, canonical workspace id, a binding revision
+  that starts at 1);
+- the budget shape, including the invariant the three bounds **nest** —
+  a single write cannot exceed what a batch may spend, and a batch cannot
+  exceed what an attempt may;
+- the agreement check between the resolved root and the request. A resolver
+  that answered for a different workspace, revision or project answered a
+  different question, and the display would be about something else.
+
+The root fingerprint stays in the projection on purpose: it lets a UI notice
+that a grant display has gone stale. It grants no execution authority.
+
+### What of a repository may be sent to a model
+
+`chat-read-v1`'s path policy — which directory, filename or extension is a
+secret, generated output, a lockfile or a binary, and the order those are
+consulted in — is now `project_context_policy.rs`. It is the highest-stakes
+table in the engine: a path that stops being recognised as sensitive is a
+secret sent to a provider, not a formatting difference, so there is one copy of
+it.
+
+**Case folding stays with the host.** Foundation folds with
+`CFStringFold(kCFCompareCaseInsensitive)`, which is Unicode case *folding* and
+not lowercasing; Rust's `to_lowercase` is a different operation and the core
+carries no folding table. So `ProjectContextPolicy.mm` folds exactly as it
+always did and passes the folded spellings across — the same shape as the
+`foundation-json-v1` projection. Foundation's `pathExtension` and
+`stringByDeletingPathExtension` travel with them, applied to the folded
+spelling, because their edge cases (`a.`, `.hidden`, `a.b.c`) are Foundation's
+too. Nothing about *which* folded names are sensitive stays behind.
+
+Two properties worth naming because a port loses them quietly:
+
+- **The reason is the first one met walking the path from the root**, not the
+  most serious one on it. `node_modules/.ssh/id_rsa` is omitted as *generated*,
+  because the walk stops at `node_modules`. Within a single component, secret
+  is tested before generated.
+- **The length bound is decided on the reported length alone, before a single
+  character is read.** Normalizing first would do work proportional to a
+  hostile input that is about to be refused. That check stays on the host side
+  of the call; the core bounds the path too, but by then the copy has happened.
+
+The second one was a regression this cut introduced and
+`testPublicStringInputsAreBoundedBeforeNormalization` caught it — it hands the
+policy a string that reports a length of a megabyte and throws if anything
+reads it. That suite's 31 tests were written against the original
+implementation, which is what makes them parity evidence rather than a port
+agreeing with itself.
+
 ### Pinning a port against the implementation it replaced
 
 Four of the migrations in this document shipped fidelity regressions that the

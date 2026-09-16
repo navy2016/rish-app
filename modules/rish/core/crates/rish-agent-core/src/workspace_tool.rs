@@ -67,7 +67,7 @@ pub fn path_components(path: &str, allow_root: bool) -> Option<Vec<String>> {
 // documented control/format path constraint. Rust's is_control covers Cc only.
 // https://www.unicode.org/Public/16.0.0/ucd/extracted/DerivedGeneralCategory.txt
 // Do not reject adjacent marks, private-use or unassigned scalars.
-fn path_control_or_format(c: char) -> bool {
+pub fn path_control_or_format(c: char) -> bool {
     c.is_control()
         || matches!(c,
             '\u{00ad}' | '\u{0600}'..='\u{0605}' | '\u{061c}' | '\u{06dd}' |
