@@ -90,16 +90,4 @@ jobs:
           arch: x86_64
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: |
-            set -e
-            APK=apps/mobile/android/app/build/outputs/apk/release/app-release.apk
-            adb install -r "$APK"
-            adb shell am start -W -n tech.zseven.rish/.MainActivity
-            sleep 30
-            adb shell pidof tech.zseven.rish
-            adb logcat -d > "$RUNNER_TEMP/logcat.txt"
-            if grep -E "FATAL EXCEPTION|PlatformConstants could not be found|JavascriptException|Abort message" "$RUNNER_TEMP/logcat.txt"; then
-              echo "startup crash detected" >&2
-              exit 1
-            fi
-            echo "SMOKE OK: app process is alive with no startup crash"
+          script: sh "$GITHUB_WORKSPACE/.github/scripts/smoke-android.sh"
