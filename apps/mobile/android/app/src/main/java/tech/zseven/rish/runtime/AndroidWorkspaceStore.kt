@@ -429,6 +429,7 @@ internal class AndroidWorkspaceStore private constructor(private val context: Co
             if (file.exists() && expectedRevision != null && digest(file) != expectedRevision) {
                 throw WorkspaceFailure("E_WORKSPACE_CONFLICT", "The file changed since it was read.")
             }
+            val existed = file.exists()
             file.parentFile?.mkdirs()
             val staging = File(file.parentFile, ".rish-write-${uuid()}")
             FileOutputStream(staging).use { output ->
@@ -439,7 +440,7 @@ internal class AndroidWorkspaceStore private constructor(private val context: Co
                 staging.delete()
                 throw WorkspaceFailure("E_WORKSPACE_IO", "File could not be written.")
             }
-            return JSONObject().put("schema_version", 1).put("root", rootRef(record)).put("file", fileEntry(path, file)).put("created", createOnly && !file.exists())
+            return JSONObject().put("schema_version", 1).put("root", rootRef(record)).put("file", fileEntry(path, file)).put("created", !existed)
         }
         val parts = path.split('/').toMutableList()
         val name = parts.removeAt(parts.size - 1)
