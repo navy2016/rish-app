@@ -263,9 +263,10 @@ fn the_decision_carries_the_normalized_path() {
 }
 
 #[test]
-fn the_reducer_answers_both_ops() {
+fn the_reducer_answers_its_ops() {
     let reply: Value = serde_json::from_str(&reduce_json(
         &json!({ "op": "normalize", "path": "cafe\u{301}.md" }).to_string(),
+        b"",
     ))
     .expect("reply");
     assert_eq!(reply["normalized"], json!("caf\u{e9}.md"));
@@ -280,13 +281,87 @@ fn the_reducer_answers_both_ops() {
             "filename_extension": "",
         })
         .to_string(),
+        b"",
     ))
     .expect("reply");
     assert_eq!(reply["eligible"], json!(false));
     assert_eq!(reply["omission_reason"], json!(REASON_SECRET_PATH));
+    let reply: Value = serde_json::from_str(&reduce_json(
+        &json!({ "op": "content_decision" }).to_string(),
+        b"hello\n",
+    ))
+    .expect("reply");
+    assert_eq!(reply["eligible"], json!(true));
     assert_eq!(
-        serde_json::from_str::<Value>(&reduce_json(&json!({ "op": "teleport" }).to_string()))
+        serde_json::from_str::<Value>(&reduce_json(&json!({ "op": "teleport" }).to_string(), b""))
             .expect("reply")["ok"],
         json!(false)
     );
+}
+
+/// The order is the rule: over budget is refused before the bytes are looked
+/// at, a NUL makes it binary before it is decoded, and only then does encoding
+/// matter. A file that is all three must report the first.
+#[test]
+fn content_is_judged_in_a_fixed_order() {
+    assert_eq!(content_decision(b"hello\n"), (true, None));
+    assert_eq!(content_decision(b""), (true, None));
+    assert_eq!(content_decision(b"a\0b"), (false, Some(REASON_BINARY)));
+    // Invalid UTF-8 with no NUL.
+    assert_eq!(
+        content_decision(&[0x66, 0xff, 0x66]),
+        (false, Some(REASON_INVALID_ENCODING))
+    );
+    let mut over = vec![b'a'; MAX_FILE_BYTES + 1];
+    assert_eq!(
+        content_decision(&over),
+        (false, Some(REASON_BUDGET_EXCEEDED))
+    );
+    // Over budget wins over a NUL and over bad encoding.
+    over[0] = 0;
+    over[1] = 0xff;
+    assert_eq!(
+        content_decision(&over),
+        (false, Some(REASON_BUDGET_EXCEEDED))
+    );
+    // At the budget it is judged normally.
+    assert_eq!(content_decision(&vec![b'a'; MAX_FILE_BYTES]), (true, None));
+    // A NUL wins over bad encoding.
+    assert_eq!(
+        content_decision(&[0x66, 0xff, 0x00]),
+        (false, Some(REASON_BINARY))
+    );
+}
+
+/// Tab, newline, carriage return and form feed are ordinary text; the other
+/// controls make a file binary. The scan walks UTF-16 code units, so a format
+/// character outside the BMP arrives as two surrogates and passes — which is
+/// what the original did, not an oversight to be tidied up.
+#[test]
+fn only_four_control_characters_belong_in_text() {
+    for allowed in ["a\tb", "a\nb", "a\rb", "a\u{c}b"] {
+        assert_eq!(
+            content_decision(allowed.as_bytes()),
+            (true, None),
+            "{allowed:?}"
+        );
+    }
+    for binary in [
+        "a\u{1}b",
+        "a\u{7f}b",
+        "a\u{9f}b",
+        "a\u{ad}b",
+        "a\u{200b}b",
+        "a\u{feff}b",
+    ] {
+        assert_eq!(
+            content_decision(binary.as_bytes()),
+            (false, Some(REASON_BINARY)),
+            "{binary:?}"
+        );
+    }
+    // U+E0001 LANGUAGE TAG is a format character, but outside the BMP.
+    assert_eq!(content_decision("a\u{e0001}b".as_bytes()), (true, None));
+    // An ordinary astral character is text.
+    assert_eq!(content_decision("a\u{1f600}b".as_bytes()), (true, None));
 }

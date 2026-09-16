@@ -314,8 +314,10 @@ pub unsafe extern "C" fn rish_agent_policy_reduce(
 
 /// Runs one chat-read-v1 project-context policy decision over the JSON
 /// envelope documented on
-/// `rish_agent_core::project_context_policy::reduce_json`. Case folding stays
-/// with the host; which folded names are sensitive is decided here.
+/// `rish_agent_core::project_context_policy::reduce_json`; `content` carries a
+/// file's raw bytes for the `content_decision` op and may be null for the
+/// others. Case folding stays with the host; which folded names are sensitive
+/// is decided here.
 ///
 /// # Safety
 /// `pointer` must reference `length` readable bytes or be null.
@@ -323,11 +325,18 @@ pub unsafe extern "C" fn rish_agent_policy_reduce(
 pub unsafe extern "C" fn rish_agent_project_context_reduce(
     pointer: *const c_char,
     length: usize,
+    content: *const u8,
+    content_length: usize,
 ) -> *mut c_char {
     let Some(text) = input(pointer, length) else {
         return std::ptr::null_mut();
     };
-    output(project_context_reduce_json(text))
+    let bytes = if content.is_null() || content_length == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(content, content_length)
+    };
+    output(project_context_reduce_json(text, bytes))
 }
 
 /// Parses one provider completion response over the JSON envelope documented

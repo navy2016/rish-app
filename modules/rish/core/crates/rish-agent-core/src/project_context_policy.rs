@@ -308,6 +308,50 @@ pub fn path_decision(
     }
 }
 
+pub const REASON_INVALID_ENCODING: &str = "invalid_encoding";
+pub const REASON_BUDGET_EXCEEDED: &str = "budget_exceeded";
+
+/// A file this size is past what a context may spend on one file.
+pub const MAX_FILE_BYTES: usize = 64 * 1024;
+
+/// The four control characters ordinary text is allowed to contain.
+fn allowed_control(unit: u16) -> bool {
+    matches!(unit, 0x09 | 0x0a | 0x0d | 0x0c)
+}
+
+/// `decisionForContentData:`. The order is the rule: a file over budget is
+/// refused before its bytes are looked at, a NUL makes it binary before it is
+/// decoded, and only then does encoding matter.
+///
+/// The control scan walks **UTF-16 code units**, because Foundation's
+/// `characterIsMember:` takes a `unichar` and that is what the original did.
+/// A format character outside the BMP arrives as two surrogates, neither of
+/// which is a control character, so it passes — reproducing that is the point.
+pub fn content_decision(data: &[u8]) -> (bool, Option<&'static str>) {
+    if data.len() > MAX_FILE_BYTES {
+        return (false, Some(REASON_BUDGET_EXCEEDED));
+    }
+    if data.contains(&0) {
+        return (false, Some(REASON_BINARY));
+    }
+    let Ok(text) = std::str::from_utf8(data) else {
+        return (false, Some(REASON_INVALID_ENCODING));
+    };
+    for unit in text.encode_utf16() {
+        if allowed_control(unit) {
+            continue;
+        }
+        // A surrogate is never a control or format character; anything else
+        // in the BMP is tested exactly as Foundation would.
+        if let Some(c) = char::from_u32(u32::from(unit)) {
+            if path_control_or_format(c) {
+                return (false, Some(REASON_BINARY));
+            }
+        }
+    }
+    (true, None)
+}
+
 /// NFC, so the host and the core agree on the normalized spelling this policy
 /// is expressed over.
 pub fn normalize(path: &str) -> String {
@@ -315,8 +359,8 @@ pub fn normalize(path: &str) -> String {
 }
 
 /// One envelope in, one reply out; see `rish_agent_project_context_reduce`.
-pub fn reduce_json(input: &str) -> String {
-    match reduce_json_inner(input) {
+pub fn reduce_json(input: &str, content: &[u8]) -> String {
+    match reduce_json_inner(input, content) {
         Some(value) => value.to_string(),
         None => json!({ "ok": false }).to_string(),
     }
@@ -330,7 +374,7 @@ fn folded_from<'a>(value: &'a Value) -> Option<Folded<'a>> {
     })
 }
 
-fn reduce_json_inner(input: &str) -> Option<Value> {
+fn reduce_json_inner(input: &str, content: &[u8]) -> Option<Value> {
     let envelope: Value = serde_json::from_str(input).ok()?;
     match envelope.get("op")?.as_str()? {
         "normalize" => {
@@ -352,6 +396,10 @@ fn reduce_json_inner(input: &str) -> Option<Value> {
                 "eligible": decision.eligible,
                 "omission_reason": decision.omission_reason,
             }))
+        }
+        "content_decision" => {
+            let (eligible, reason) = content_decision(content);
+            Some(json!({ "ok": true, "eligible": eligible, "omission_reason": reason }))
         }
         _ => None,
     }

@@ -121,10 +121,13 @@ char *rish_agent_tool_registry_reduce(const char *json, size_t json_length);
 char *rish_agent_policy_reduce(const char *json, size_t json_length);
 
 /// One chat-read-v1 project-context policy decision over {"op",...}:
-/// normalize, path_decision. Which of a repository may be sent to a model is
-/// decided here; case folding stays with the host, because Foundation folds
-/// with CFStringFold and the core carries no folding table.
-char *rish_agent_project_context_reduce(const char *json, size_t json_length);
+/// normalize, path_decision, content_decision. Which of a repository may be
+/// sent to a model is decided here; case folding stays with the host, because
+/// Foundation folds with CFStringFold and the core carries no folding table.
+/// `content` carries a file's raw bytes for content_decision (any bytes, empty
+/// allowed) and may be NULL for the other ops.
+char *rish_agent_project_context_reduce(const char *json, size_t json_length,
+                                        const uint8_t *content, size_t content_length);
 
 /// Parses one provider completion response over
 /// {"op":"parse","response","requested_model","model_supported","thinking_mode",
