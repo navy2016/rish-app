@@ -18,7 +18,9 @@ import tech.zseven.rish.modules.SessionSnapshotsModule
 
 /**
  * Registers the Android task-experience service and the 11 iOS-mirrored
- * runtime modules that remain unavailable until their implementations land.
+ * runtime modules. LocalWorkspace, LocalWorkspaces and LocalMirrors are real
+ * implementations; the remaining ones still reject their capabilities
+ * explicitly until their implementations land.
  *
  * Bridge decision (documented for the architecture review): the app runs RN
  * 0.87 with newArchEnabled=true (apps/mobile/android/gradle.properties), and
