@@ -135,7 +135,9 @@ static void OnOutput(void *context, const char *bytes, size_t size) {
     @"python": @"cd /workspace && exec /usr/bin/python3 -u \"$@\"",
     @"node": @"cd /workspace && exec /usr/bin/node \"$@\"",
     @"bun": @"cd /workspace && exec /usr/bin/bun run \"$@\"",
-    @"go": @"cd /workspace && exec /usr/bin/go run \"$@\"",
+    // go run consumes leading .go arguments as more source files. Build the
+    // selected entry first so every supplied argument reaches the program.
+    @"go": @"cd /workspace || exit; source=$1; shift; /usr/bin/go build -o /tmp/rish-program \"$source\" && exec /tmp/rish-program \"$@\"",
     @"rust": @"cd /workspace || exit; source=$1; shift; /usr/bin/rustc \"$source\" -o /tmp/rish-program && exec /tmp/rish-program \"$@\"",
     @"java": [entryPath.pathExtension.lowercaseString isEqual:@"jar"]
         ? @"cd /workspace && exec /usr/bin/java -jar \"$@\""

@@ -22,6 +22,7 @@ import apk
 import ext4
 import package as environment_package
 import python_cache
+import java_cds
 
 REPO = Path(__file__).resolve().parents[2]
 LOCKS = REPO / 'runtime-environments'
@@ -92,7 +93,8 @@ def add_layout(entries: dict, lock: dict) -> None:
                   'alpine_version': lock['alpine_version'], 'packages': lock['packages'],
                   'extra_archives': lock.get('extra_archives', []),
                   'derived_archives': lock.get('derived_archives', []),
-                  'build_scripts_executed_in_guest': False}
+                  'build_scripts_executed_in_guest': any(
+                      item.get('kind') == 'java-static-cds' for item in lock.get('derived_archives', []))}
     if lock['family'] == 'python':
         provenance['python_bytecode'] = lock['python_bytecode']
     entries['usr/share/doc/rish-environment/sources.json'] = (
@@ -148,9 +150,21 @@ def pack_ext4(root: Path, disk: Path, lock: dict, output: Path) -> None:
     ext4.normalize_metadata(disk, EPOCH)
 
 
-def build(family: str, output: Path, download_limit_mib: int, bootstrap_go_cache: bool = False) -> dict:
+def build(family: str, output: Path, download_limit_mib: int, bootstrap_go_cache: bool = False,
+          java_cds_receipt: Path | None = None) -> dict:
     lock_path = LOCKS / (family + '.lock.json')
     lock = json.loads(lock_path.read_text())
+    cds_input = None
+    if java_cds_receipt is not None:
+        if family != 'java' or bootstrap_go_cache:
+            raise ValueError('CDS derivation applies only to Java')
+        cds_input = java_cds.load_candidate(java_cds_receipt)
+        descriptor = cds_input[0]
+        identifier, version = descriptor.get('environment_id'), descriptor.get('version')
+        if (not isinstance(identifier, str) or not identifier.startswith(lock['environment_id'] + '-')
+                or not isinstance(version, str) or not version.startswith(lock['version'] + '+')):
+            raise ValueError('CDS candidate must have a new environment identity and version')
+        lock['environment_id'], lock['version'] = identifier, version
     if bootstrap_go_cache:
         if family != 'go': raise ValueError('cache bootstrap applies only to Go')
         lock.pop('derived_archives', None)
@@ -212,6 +226,10 @@ def build(family: str, output: Path, download_limit_mib: int, bootstrap_go_cache
             if name in entries and entries[name] != entry:
                 raise ValueError('derived cache conflicts with signed package data')
             entries[name] = entry
+    cds_validation = None
+    if cds_input is not None:
+        cds_validation = java_cds.install(entries, *cds_input)
+        lock['derived_archives'] = [cds_input[0]]
     add_layout(entries, lock)
     bytecode_validation = python_cache.validate(entries, lock)
     contents_bytes = sum(len(data) for mode, data in entries.values() if stat.S_ISREG(mode))
@@ -223,10 +241,10 @@ def build(family: str, output: Path, download_limit_mib: int, bootstrap_go_cache
     disk = work / 'rootfs.ext4'
     pack_ext4(root, disk, lock, output)
     scratch_bytes = None
-    if family == 'python':
+    if family == 'python' or cds_input is not None:
         scratch_bytes = ext4.available_bytes(disk)
         if scratch_bytes < 48 * 1024 * 1024:
-            raise ValueError('Python ext4 lacks the required 48 MiB of free scratch capacity')
+            raise ValueError('environment ext4 lacks the required 48 MiB of free scratch capacity')
     manifest = {key: lock[key] for key in ['schema_version', 'environment_id', 'family', 'display_name', 'version', 'architecture', 'kernel_sha256', 'minimum_memory_mib']}
     manifest.update({'disk_sha256': sha256(disk), 'disk_bytes': disk.stat().st_size})
     header = json.dumps(manifest, separators=(',', ':'), sort_keys=True).encode('utf-8')
@@ -252,6 +270,10 @@ def build(family: str, output: Path, download_limit_mib: int, bootstrap_go_cache
     if bytecode_validation:
         receipt['python_bytecode_validation'] = bytecode_validation
         receipt['free_scratch_bytes'] = scratch_bytes
+    if cds_validation:
+        receipt['java_cds_validation'] = cds_validation
+        receipt['java_cds_receipt_sha256'] = sha256(java_cds_receipt)
+        receipt['free_scratch_bytes'] = scratch_bytes
     (output / (family + '.build.json')).write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps({key: receipt[key] for key in ['manifest', 'package_path', 'package_bytes', 'package_sha256', 'disk_path']}, indent=2), flush=True)
     return receipt
@@ -263,5 +285,8 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument('--download-limit-mib', type=int, default=1024)
     parser.add_argument('--bootstrap-go-cache', action='store_true', help='build a bare Go disk only for controlled std-cache generation')
+    parser.add_argument('--java-cds-receipt', type=Path,
+                        help='add a verified build-only CDS file to a fresh Java candidate; does not edit its lock or catalog')
     arguments = parser.parse_args()
-    build(arguments.family, arguments.output.resolve(), arguments.download_limit_mib, arguments.bootstrap_go_cache)
+    build(arguments.family, arguments.output.resolve(), arguments.download_limit_mib, arguments.bootstrap_go_cache,
+          arguments.java_cds_receipt.resolve() if arguments.java_cds_receipt else None)

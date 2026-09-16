@@ -6,6 +6,8 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <os/log.h>
 
+#include "rish_agent_core.h"
+
 #include <math.h>
 
 static NSUInteger const DSHCompletionTransportMaximumRequestBytes = 40 * 1024 * 1024;
@@ -39,27 +41,36 @@ static BOOL DSHCompletionTransportValidRequestId(NSString *value) {
   return uuid != nil && [uuid.UUIDString.lowercaseString isEqualToString:value];
 }
 
+// Which failure a round may report is a closed vocabulary, and it lives in the
+// shared core (modules/rish/core, `rish_agent_completion_response_reduce`):
+// the controller switches on these codes to decide whether a retry could help,
+// so a code outside the set would be a failure nothing knows how to recover
+// from.
+static NSString *DSHCompletionTransportFailureCode(NSString *op,
+                                                    NSDictionary *fields,
+                                                    NSString *fallback) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_completion_response_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return fallback;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  id code = [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply[@"failure_code"] : nil;
+  return [code isKindOfClass:NSString.class] ? code : fallback;
+}
+
+/// The seam stays fail-closed: a verbose diagnostic or a third-party NSError
+/// must never travel onward as a failure code.
 static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
-  // DSHParseCompletionResponseSchema2 intentionally uses stable schema
-  // codes, but keep this seam fail-closed if a future parser adds a verbose
-  // diagnostic or a third-party NSError.
-  NSString *candidate = error.localizedDescription;
-  static NSSet<NSString *> *allowed = nil;
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    allowed = [NSSet setWithArray:@[
-      @"E_COMPLETION_RESPONSE_JSON",
-      @"E_COMPLETION_PROVIDER_RESPONSE_ID",
-      @"E_COMPLETION_RESPONSE_MODEL",
-      @"E_COMPLETION_MODEL_MISMATCH",
-      @"E_COMPLETION_EMPTY_RESPONSE",
-      @"E_COMPLETION_TOOL_CALL_INVALID",
-      @"E_COMPLETION_FINISH_RELATION",
-      @"E_COMPLETION_LENGTH",
-    ]];
-  });
-  return [allowed containsObject:candidate] ? candidate :
-      @"E_COMPLETION_EMPTY_RESPONSE";
+  return DSHCompletionTransportFailureCode(@"parser_failure", @{
+    @"candidate" : error.localizedDescription ?: @"",
+  }, @"E_COMPLETION_EMPTY_RESPONSE");
 }
 
 @interface DSHCompletionProviderTransportContext : NSObject
@@ -832,17 +843,13 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
 
 - (NSString *)providerErrorCodeForHTTPStatus:(NSInteger)statusCode
                                          data:(NSData *)data {
-  // Shared mapping: an unauthenticated or forbidden call means the stored
-  // credential is unusable; a rate limit or provider overload is reported
-  // as its own stable code so the caller can back off instead of retrying
-  // as a generic transport-status failure.
-  if (statusCode == 401 || statusCode == 403) {
-    return @"E_COMPLETION_CREDENTIAL_UNAVAILABLE";
-  }
-  if (statusCode == 429 || statusCode == 529) {
-    return @"E_COMPLETION_HTTP_429";
-  }
-  return @"E_COMPLETION_HTTP_STATUS";
+  // An unauthenticated or forbidden call means the stored credential is
+  // unusable; a rate limit or provider overload gets its own stable code so
+  // the caller can back off instead of retrying as a generic status failure.
+  (void)data;
+  return DSHCompletionTransportFailureCode(@"http_status_failure", @{
+    @"status" : @(statusCode),
+  }, @"E_COMPLETION_HTTP_STATUS");
 }
 
 - (id<DSHProviderStreamEventParsing>)providerNewStreamEventParser {

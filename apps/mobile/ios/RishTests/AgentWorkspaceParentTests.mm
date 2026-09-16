@@ -2,10 +2,15 @@
 #import "DSHTestStorageFixture.h"
 #import "AgentWorkspaceParent.h"
 #import "AgentWorkspaceToolExecutor.h"
+#import "AgentWorkspaceReadTools.h"
+#import "AgentNativeWAL.h"
 #import "AgentRootResolver.h"
 #import "LocalWorkspaceAccess.h"
 
 #include <fcntl.h>
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -29,6 +34,61 @@
                                                      plan:(NSDictionary *)plan {
   return [[DSHReadOnlyCreatedParent alloc] initWithRootDescriptor:rootDescriptor
       components:components plan:plan];
+}
+@end
+
+// Produce only the current entry; a million-entry case never allocates or
+// scans a million names. The executor's descriptor loop must stop itself.
+@interface DSHSyntheticDirectoryExecutor : DSHAgentWorkspaceToolExecutor {
+  struct dirent _entry;
+}
+@property(nonatomic) NSUInteger entryCount;
+@property(nonatomic) NSUInteger readCalls;
+@property(nonatomic) NSUInteger statCalls;
+@property(nonatomic) NSUInteger unnamedIndex;
+@property(nonatomic) BOOL hiddenFirst;
+@property(nonatomic) int statError;
+@property(nonatomic) int successfulStatErrno;
+@property(nonatomic) int endReadError;
+@end
+@implementation DSHSyntheticDirectoryExecutor
+- (instancetype)initWithRootResolver:(DSHAgentRootResolver *)resolver {
+  self = [super initWithRootResolver:resolver];
+  if (self) _unnamedIndex = NSNotFound;
+  return self;
+}
+- (struct dirent *)nextEntryInDirectory:(__unused DIR *)directory {
+  NSUInteger index = self.readCalls++;
+  memset(&_entry, 0, sizeof(_entry));
+  if (self.hiddenFirst && index == 0) {
+    strlcpy(_entry.d_name, ".staging-disappeared", sizeof(_entry.d_name));
+    return &_entry;
+  }
+  if (self.hiddenFirst) index--;
+  if (index >= self.entryCount) {
+    if (self.endReadError != 0) errno = self.endReadError;
+    return nullptr;
+  }
+  if (index == self.unnamedIndex) {
+    _entry.d_name[0] = (char)0xff;
+  } else {
+    snprintf(_entry.d_name, sizeof(_entry.d_name), "f%08lu", (unsigned long)index);
+  }
+  return &_entry;
+}
+- (int)statEntryNamed:(__unused const char *)name
+           directory:(__unused int)descriptor
+            metadata:(struct stat *)metadata {
+  self.statCalls++;
+  if (self.statError != 0) { errno = self.statError; return -1; }
+  memset(metadata, 0, sizeof(*metadata));
+  metadata->st_mode = S_IFREG | 0600;
+  metadata->st_nlink = 1;
+  metadata->st_dev = 1;
+  metadata->st_ino = self.readCalls;
+  metadata->st_mtimespec.tv_sec = 1;
+  errno = self.successfulStatErrno;
+  return 0;
 }
 @end
 
@@ -246,5 +306,93 @@
   XCTAssertEqualObjects(result[@"status"], @"failed");
   XCTAssertEqualObjects([NSString stringWithContentsOfURL:file encoding:NSUTF8StringEncoding error:nil],
       @"changed by another writer");
+}
+- (DSHSyntheticDirectoryExecutor *)syntheticDirectory {
+  return [[DSHSyntheticDirectoryExecutor alloc] initWithRootResolver:self.resolver];
+}
+- (BOOL)listSyntheticDirectory:(DSHSyntheticDirectoryExecutor *)executor
+                         error:(NSError **)error {
+  int descriptor = open(self.workspaceURL.fileSystemRepresentation, O_RDONLY | O_DIRECTORY);
+  XCTAssertGreaterThanOrEqual(descriptor, 0);
+  if (descriptor < 0) return NO;
+  NSArray *entries = nil;
+  NSString *fingerprint = nil;
+  BOOL listed = [executor entryListForDirectoryDescriptor:descriptor
+      entries:&entries fingerprint:&fingerprint error:error];
+  close(descriptor);
+  if (listed) {
+    XCTAssertEqual(entries.count, executor.entryCount);
+    XCTAssertEqual(fingerprint.length, 64U);
+  }
+  return listed;
+}
+- (void)testDirectoryListingStopsAtTheFirstEntryBeyondCapacityBeforeStat {
+  DSHSyntheticDirectoryExecutor *executor = [self syntheticDirectory];
+  executor.entryCount = 1000000;
+  NSError *error = nil;
+  XCTAssertFalse([self listSyntheticDirectory:executor error:&error]);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorCapacity);
+  XCTAssertEqual(executor.readCalls, 1001U);
+  XCTAssertEqual(executor.statCalls, 1000U);
+}
+- (void)testDirectoryStatFailureIsImmediateConflictRatherThanTrailingErrno {
+  DSHSyntheticDirectoryExecutor *executor = [self syntheticDirectory];
+  executor.entryCount = 1000000;
+  executor.statError = ENOENT;
+  NSError *error = nil;
+  XCTAssertFalse([self listSyntheticDirectory:executor error:&error]);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
+  XCTAssertEqual(executor.readCalls, 1U);
+  XCTAssertEqual(executor.statCalls, 1U);
+}
+- (void)testDisappearingHiddenDirectoryEntryIsNeverStatted {
+  DSHSyntheticDirectoryExecutor *executor = [self syntheticDirectory];
+  executor.hiddenFirst = YES;
+  executor.statError = ENOENT;
+  NSError *error = nil;
+  XCTAssertTrue([self listSyntheticDirectory:executor error:&error], @"%@", error);
+  XCTAssertNil(error);
+  XCTAssertEqual(executor.readCalls, 2U);
+  XCTAssertEqual(executor.statCalls, 0U);
+}
+- (void)testDirectoryEOFDoesNotInheritErrnoFromAnEarlierSuccessfulCall {
+  DSHSyntheticDirectoryExecutor *executor = [self syntheticDirectory];
+  executor.entryCount = 1;
+  executor.successfulStatErrno = EACCES;
+  NSError *error = nil;
+  XCTAssertTrue([self listSyntheticDirectory:executor error:&error], @"%@", error);
+  XCTAssertNil(error);
+  XCTAssertEqual(executor.readCalls, 2U);
+  XCTAssertEqual(executor.statCalls, 1U);
+}
+- (void)testActualDirectoryReadErrorStillReportsUnavailable {
+  DSHSyntheticDirectoryExecutor *executor = [self syntheticDirectory];
+  executor.endReadError = EIO;
+  NSError *error = nil;
+  XCTAssertFalse([self listSyntheticDirectory:executor error:&error]);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorUnavailable);
+  XCTAssertEqual(executor.readCalls, 1U);
+  XCTAssertEqual(executor.statCalls, 0U);
+}
+- (void)testUndecodableDirectoryNamePrecedesCapacityWithoutStat {
+  DSHSyntheticDirectoryExecutor *executor = [self syntheticDirectory];
+  executor.entryCount = 1001;
+  executor.unnamedIndex = 1000;
+  NSError *error = nil;
+  XCTAssertFalse([self listSyntheticDirectory:executor error:&error]);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorInvalidArgument);
+  XCTAssertEqual(executor.readCalls, 1001U);
+  XCTAssertEqual(executor.statCalls, 1000U);
+}
+- (void)testWorkspacePathsRejectControlAndFormatScalarsThroughSharedCore {
+  for (NSNumber *value in @[@0x00ad, @0x200b, @0x202e, @0xfeff, @0x110bd, @0xe0001, @0xe0020]) {
+    uint32_t scalar = value.unsignedIntValue;
+    NSString *character = [[NSString alloc] initWithBytes:&scalar length:sizeof(scalar)
+        encoding:NSUTF32LittleEndianStringEncoding];
+    XCTAssertNotEqual([character rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location,
+        NSNotFound, @"U+%X", scalar);
+    XCTAssertNil(DSHAgentWorkspacePathComponents([NSString stringWithFormat:@"src/a%@b.txt", character], NO));
+  }
+  XCTAssertNotNil(DSHAgentWorkspacePathComponents(@"src/中文😀.txt", NO));
 }
 @end

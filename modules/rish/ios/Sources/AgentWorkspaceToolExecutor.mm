@@ -1,84 +1,16 @@
 #import "AgentWorkspaceToolExecutor.h"
 #import "AgentWorkspaceParent.h"
-#import <CommonCrypto/CommonDigest.h>
+#import "AgentWorkspaceReadTools.h"
 
 #import "AgentNativeWAL.h"
 #import "AgentRootResolver.h"
 #import "LocalWorkspaceAccess.h"
 
-#include "rish_agent_core.h"
-
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <sys/stdio.h>
 #include <unistd.h>
-
-// Plain content SHA-256 for model-visible source snapshot binding. This is
-// distinct from domain-separated WAL identity hashes.
-static NSString *DSHAgentWorkspacePlainSHA256(NSData *data) {
-  unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-  CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
-  NSMutableString *value = [NSMutableString stringWithCapacity:64];
-  for (NSUInteger i = 0; i < sizeof(digest); i++) [value appendFormat:@"%02x", digest[i]];
-  return value;
-}
-
-// The workspace executor's judgements live in the shared core
-// (modules/rish/core, `rish_agent_workspace_tool_reduce`): which paths it may
-// touch, what a revision is, what a listing looks like, and what a person is
-// shown before they approve a write.  What stays here is the capability — a
-// directory descriptor, bytes read and written, `fstatat` — and the caps the
-// host enforces while doing it, which it reads back from the core rather than
-// keeping a second copy of.
-static NSDictionary *DSHAgentWorkspaceReduce(NSString *op,
-                                             NSDictionary *fields,
-                                             NSError **error) {
-  NSMutableDictionary *envelope = [fields mutableCopy];
-  envelope[@"op"] = op;
-  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
-                                                    error:nil];
-  char *raw = bytes == nil ? NULL : rish_agent_workspace_tool_reduce(
-      (const char *)bytes.bytes, bytes.length);
-  if (raw == NULL) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
-  rish_agent_string_free(raw);
-  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
-                                                error:nil];
-  if (![reply isKindOfClass:NSDictionary.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-    return nil;
-  }
-  if ([reply[@"ok"] isEqual:@YES]) {
-    if (error != nullptr) *error = nil;
-    return reply;
-  }
-  NSInteger code = [reply[@"error"] isKindOfClass:NSNumber.class]
-      ? [reply[@"error"] integerValue] : 0;
-  if (code < DSHAgentNativeStoreErrorInvalidArgument ||
-      code > DSHAgentNativeStoreErrorPersistence) {
-    code = DSHAgentNativeStoreErrorCorrupt;
-  }
-  DSHSetAgentNativeStoreError(error, (DSHAgentNativeStoreErrorCode)code);
-  return nil;
-}
-
-static NSUInteger DSHAgentWorkspaceBound(NSString *name, NSUInteger fallback) {
-  static NSDictionary *bounds = nil;
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{
-    bounds = DSHAgentWorkspaceReduce(@"bounds", @{}, nullptr);
-  });
-  id value = bounds[name];
-  return [value isKindOfClass:NSNumber.class] ? [value unsignedIntegerValue]
-                                              : fallback;
-}
 
 // Leaves canonical-envelope headroom under the protected feedback cap.
 #define DSHAgentWorkspaceMaxReadBytes \
@@ -90,41 +22,6 @@ static NSUInteger DSHAgentWorkspaceBound(NSString *name, NSUInteger fallback) {
 // arguments + current file state), never from unvalidated model text.
 #define DSHAgentApprovalMaxPriorReadBytes \
     DSHAgentWorkspaceBound(@"max_prior_read_bytes", 64 * 1024)
-
-static NSArray<NSString *> *DSHAgentWorkspacePathComponents(id value,
-                                                             BOOL allowRoot) {
-  if (![value isKindOfClass:NSString.class]) return nil;
-  NSDictionary *reply = DSHAgentWorkspaceReduce(@"path_components", @{
-    @"path" : value, @"allow_root" : @(allowRoot),
-  }, nullptr);
-  id components = reply[@"components"];
-  return [components isKindOfClass:NSArray.class] ? components : nil;
-}
-
-static int DSHAgentWorkspaceOpenDirectory(int rootDescriptor,
-                                           NSArray<NSString *> *components) {
-  int current = dup(rootDescriptor);
-  if (current < 0) return -1;
-  for (NSString *component in components) {
-    int next = openat(current, component.fileSystemRepresentation,
-                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    close(current);
-    if (next < 0) return -1;
-    current = next;
-  }
-  return current;
-}
-
-static int DSHAgentWorkspaceOpenParent(int rootDescriptor,
-                                       NSArray<NSString *> *components,
-                                       NSString **name) {
-  if (components.count == 0) return -1;
-  int parent = DSHAgentWorkspaceOpenDirectory(
-      rootDescriptor,
-      [components subarrayWithRange:NSMakeRange(0, components.count - 1)]);
-  if (parent >= 0 && name != nullptr) *name = components.lastObject;
-  return parent;
-}
 
 /// The preview a person reads before they approve a write.  The whole of it —
 /// the anchored line diff, every bound, and the honest truncation flag — is a
@@ -145,20 +42,6 @@ static NSString *DSHAgentApprovalUnifiedDiff(NSString *prior,
   }
   id diff = reply[@"diff_preview"];
   return [diff isKindOfClass:NSString.class] ? diff : nil;
-}
-
-static NSString *DSHAgentWorkspaceRevision(struct stat metadata) {
-  // The host reads the numbers; their spelling is the rule, so the core says
-  // it.  Revisions are opaque bounded metadata, not a new protocol digest.
-  NSDictionary *reply = DSHAgentWorkspaceReduce(@"revision", @{
-    @"dev" : @((unsigned long long)metadata.st_dev),
-    @"ino" : @((unsigned long long)metadata.st_ino),
-    @"size" : @((unsigned long long)metadata.st_size),
-    @"mtime_sec" : @((unsigned long long)metadata.st_mtimespec.tv_sec),
-    @"mtime_nsec" : @((unsigned long long)metadata.st_mtimespec.tv_nsec),
-  }, nullptr);
-  id revision = reply[@"revision"];
-  return [revision isKindOfClass:NSString.class] ? revision : @"";
 }
 
 static BOOL DSHAgentWorkspaceSameFileState(struct stat left,
@@ -194,16 +77,6 @@ static BOOL DSHAgentWorkspaceWriteAll(int descriptor, NSData *data) {
   return YES;
 }
 
-static NSString *DSHAgentWorkspaceFeedback(NSDictionary *feedback,
-                                            NSError **error) {
-  // Canonical bytes, the protected cap, and the contract the ledger will
-  // apply — one decision, made once.
-  id reported = DSHAgentWorkspaceReduce(@"feedback", @{
-    @"feedback" : feedback ?: NSNull.null,
-  }, error)[@"feedback"];
-  return [reported isKindOfClass:NSString.class] ? reported : nil;
-}
-
 static NSDictionary *DSHAgentWorkspaceFailure(NSString *name,
                                                NSString *failureCode,
                                                BOOL ambiguous,
@@ -222,66 +95,6 @@ static NSDictionary *DSHAgentWorkspaceWriteFailure(NSString *name, NSString *cod
     BOOL ambiguous, DSHAgentWorkspaceParentCreation *parents, NSError **error) {
   BOOL cleaned = parents == nil || [parents removeCreatedDirectoriesWithError:nil];
   return DSHAgentWorkspaceFailure(name, code, ambiguous || !cleaned, error);
-}
-
-/// Walks the directory and hands every entry to the core, in readdir order,
-/// with the kind the host is willing to expose it as.  An entry it will not
-/// expose — a symlink, a device, a hard-linked regular file, one it could not
-/// stat, or a name that is not UTF-8 — is reported as such rather than refused
-/// here, because the order the three refusals are reached in is part of the
-/// rule and belongs with the rule.
-static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
-                                       NSArray **entriesOut,
-                                       NSString **fingerprintOut,
-                                       NSError **error) {
-  int duplicate = dup(directoryDescriptor);
-  DIR *directory = duplicate < 0 ? nullptr : fdopendir(duplicate);
-  if (directory == nullptr) {
-    if (duplicate >= 0) close(duplicate);
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorUnavailable);
-    return NO;
-  }
-  NSMutableArray<NSDictionary *> *observed = [NSMutableArray array];
-  struct dirent *entry = nullptr;
-  errno = 0;
-  while ((entry = readdir(directory)) != nullptr) {
-    NSData *nameBytes = [NSData dataWithBytes:entry->d_name
-                                       length:strlen(entry->d_name)];
-    NSString *name = [[NSString alloc] initWithData:nameBytes
-                                           encoding:NSUTF8StringEncoding];
-    struct stat metadata = {};
-    BOOL usable = fstatat(directoryDescriptor, entry->d_name, &metadata,
-                          AT_SYMLINK_NOFOLLOW) == 0 &&
-        !S_ISLNK(metadata.st_mode) &&
-        (S_ISREG(metadata.st_mode) || S_ISDIR(metadata.st_mode)) &&
-        (!S_ISREG(metadata.st_mode) || metadata.st_nlink == 1);
-    // A name that is not UTF-8 is reported rather than refused here too: it
-    // refuses ahead of the capacity bound, and that ordering is the core's to
-    // apply, not this walk's.
-    [observed addObject:@{
-      @"name" : name ?: @"",
-      @"kind" : name == nil ? @"unnamed"
-          : (!usable ? @"invalid"
-                     : (S_ISDIR(metadata.st_mode) ? @"directory" : @"file")),
-      @"revision" : (name != nil && usable) ? DSHAgentWorkspaceRevision(metadata)
-                                            : @"",
-    }];
-  }
-  int readError = errno;
-  closedir(directory);
-  if (readError != 0) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorUnavailable);
-    return NO;
-  }
-  NSDictionary *listing = DSHAgentWorkspaceReduce(@"directory_listing", @{
-    @"entries" : observed,
-  }, error);
-  if (listing == nil) return NO;
-  if (entriesOut != nullptr) *entriesOut = listing[@"entries"];
-  if (fingerprintOut != nullptr) {
-    *fingerprintOut = listing[@"directory_fingerprint_sha256"];
-  }
-  return YES;
 }
 
 @interface DSHAgentWorkspaceToolExecutor ()
@@ -350,8 +163,8 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     if ([name isEqualToString:@"list_dir"]) {
       int directory = DSHAgentWorkspaceOpenDirectory(rootDescriptor, components);
       NSString *fingerprint = nil;
-      BOOL ok = directory >= 0 && DSHAgentWorkspaceEntryList(
-          directory, nullptr, &fingerprint, blockError);
+      BOOL ok = directory >= 0 && [self entryListForDirectoryDescriptor:directory
+          entries:nullptr fingerprint:&fingerprint error:blockError];
       if (directory >= 0) close(directory);
       if (!ok) return NO;
       precondition = @{
@@ -582,8 +395,8 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
       int directory = DSHAgentWorkspaceOpenDirectory(rootDescriptor, components);
       NSArray *entries = nil;
       NSString *fingerprint = nil;
-      BOOL ok = directory >= 0 && DSHAgentWorkspaceEntryList(
-          directory, &entries, &fingerprint, blockError);
+      BOOL ok = directory >= 0 && [self entryListForDirectoryDescriptor:directory
+          entries:&entries fingerprint:&fingerprint error:blockError];
       if (directory >= 0) close(directory);
       if (!ok) return NO;
       if (![fingerprint isEqual:precondition[@"directory_fingerprint_sha256"]]) {

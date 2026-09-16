@@ -214,11 +214,12 @@ class GoCacheTests(unittest.TestCase):
 
 
 def load_tests(loader, tests, pattern):
-    spec = importlib.util.spec_from_file_location('runtime_python_cache_tests',
-        ROOT / 'scripts/tests/runtime-python-cache-test.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    tests.addTests(loader.loadTestsFromModule(module))
+    for name in ['runtime-python-cache-test', 'runtime-java-cds-test']:
+        spec = importlib.util.spec_from_file_location(name.replace('-', '_'),
+            ROOT / ('scripts/tests/' + name + '.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        tests.addTests(loader.loadTestsFromModule(module))
     return tests
 
 

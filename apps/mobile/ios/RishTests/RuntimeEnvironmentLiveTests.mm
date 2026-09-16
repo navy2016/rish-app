@@ -241,10 +241,14 @@ static BOOL Terminal(NSDictionary *receipt) {
 }
 
 - (void)startEntry:(NSString *)entry {
+  [self startEntry:entry args:@[@"6"]];
+}
+
+- (void)startEntry:(NSString *)entry args:(NSArray<NSString *> *)args {
   NSError *error = nil;
   NSDictionary *receipt = [self.programs startRequest:@{
       @"schema_version":@1, @"operation_id":NSUUID.UUID.UUIDString.lowercaseString,
-      @"root":self.rootRef, @"environment_id":self.environmentId, @"entry_path":entry, @"args":@[@"6"],
+      @"root":self.rootRef, @"environment_id":self.environmentId, @"entry_path":entry, @"args":args,
     } error:&error];
   XCTAssertNotNil(receipt, @"%@", error);
   self.runLocator = @{@"schema_version":@1, @"run_id":receipt[@"run_id"]};
@@ -318,9 +322,14 @@ static BOOL Terminal(NSDictionary *receipt) {
       marker:@"RISH_JAVA_LIVE_OK 42"];
 }
 - (void)testGoEnvironmentCompilesAndExecutesWorkspaceSource {
-  [self runFamily:@"go" entry:@"main.go"
-      source:@"package main\nimport (\"fmt\"; \"os\"; \"strconv\")\nfunc main(){ n,e:=strconv.Atoi(os.Args[1]); if e!=nil { panic(e) }; fmt.Printf(\"RISH_GO_LIVE_OK %d\\n\",n*7) }\n"
-      marker:@"RISH_GO_LIVE_OK 42"];
+  [self installFamily:@"go"];
+  NSData *source = [@"package main\nimport (\"fmt\"; \"os\"; \"strconv\"; \"strings\")\nfunc main(){ n,e:=strconv.Atoi(strings.TrimSuffix(os.Args[1],\".go\")); if e!=nil { panic(e) }; fmt.Printf(\"RISH_GO_LIVE_OK %d\\n\",n*7) }\n"
+      dataUsingEncoding:NSUTF8StringEncoding];
+  [self writeSource:source entry:@"main.go"];
+  // No 6.go exists. Treating this program argument as a compiler input fails.
+  [self startEntry:@"main.go" args:@[@"6.go"]];
+  [self waitForMarker:@"RISH_GO_LIVE_OK 42" requireTerminal:YES family:@"go" entry:@"main.go"];
+  [self assertHostSource:source entry:@"main.go"];
 }
 - (void)testRustEnvironmentCompilesAndExecutesWorkspaceSource {
   [self runFamily:@"rust" entry:@"main.rs"

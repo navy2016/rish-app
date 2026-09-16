@@ -131,8 +131,8 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 
 /// One workspace-tool decision over {"op",...}: bounds, path_components,
-/// revision, directory_listing, diff_preview, write_expected_prior, feedback,
-/// failure_result. The host owns the descriptors and the bytes; which paths it
+/// revision, directory_entry_decision, directory_listing, diff_preview,
+/// write_expected_prior, feedback, failure_result. The host owns the descriptors and the bytes; which paths it
 /// may touch, what a listing looks like and what a person is shown before
 /// approving a write are decided here.
 char *rish_agent_workspace_tool_reduce(const char *json, size_t json_length);

@@ -32,7 +32,13 @@ xcodebuild build-for-testing -workspace apps/mobile/ios/Rish.xcworkspace \
   -only-testing:RishTests/AgentPolicyTests \
   -only-testing:RishTests/RuntimeProgramTests \
   -only-testing:RishTests/CompletionWriteRevisionTests \
+  -only-testing:RishTests/CompletionV2Tests \
+  -only-testing:RishTests/DSHCompletionProviderTransportTests \
+  -only-testing:RishTests/AgentProviderRoundServiceTests \
+  -only-testing:RishTests/AgentNativeStoreTests \
   -only-testing:RishTests/AgentWorkspaceParentTests \
+  -only-testing:RishTests/AgentGitIndexPathTests \
+  -only-testing:RishTests/CompletionResponseParityTests \
   -only-testing:RishTests/RuntimeEnvironmentOwnershipTests \
   -only-testing:RishTests/RuntimeServiceVMTests \
   -only-testing:RishTests/RuntimeHTTPServerTests \
@@ -112,7 +118,13 @@ xcodebuild test-without-building -xctestrun "${plans[0]}" \
   -only-testing:RishTests/AgentPolicyTests \
   -only-testing:RishTests/RuntimeProgramTests \
   -only-testing:RishTests/CompletionWriteRevisionTests \
+  -only-testing:RishTests/CompletionV2Tests \
+  -only-testing:RishTests/DSHCompletionProviderTransportTests \
+  -only-testing:RishTests/AgentProviderRoundServiceTests \
+  -only-testing:RishTests/AgentNativeStoreTests \
   -only-testing:RishTests/AgentWorkspaceParentTests \
+  -only-testing:RishTests/AgentGitIndexPathTests \
+  -only-testing:RishTests/CompletionResponseParityTests \
   -only-testing:RishTests/RuntimeEnvironmentOwnershipTests \
   -only-testing:RishTests/RuntimeServiceVMTests \
   -only-testing:RishTests/RuntimeHTTPServerTests \
