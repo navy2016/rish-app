@@ -4,7 +4,7 @@ import org.json.JSONObject
 
 /**
  * JNI binding for the shared Rust agent core (modules/rish/core, see
- * src/main/cpp/rish_agent_core_jni.cpp).
+ * src/main/cpp/rish/rish_agent_core_jni.cpp).
  *
  * The library is only present in builds that staged it through
  * scripts/prepare-rish-agent-core-android.sh. [available] answers whether it

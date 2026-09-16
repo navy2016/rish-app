@@ -185,20 +185,19 @@ android {
             }
         }
         def cmakeArguments = ["-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"]
-        def cmakeTargets = []
         if (rishGuestEnabled) {
             cmakeArguments += "-DRISH_FFI_DIR=${rishFfiDir.absolutePath}".toString()
-            cmakeTargets += "rish_guest_jni"
         }
         if (rishAgentCoreEnabled) {
             cmakeArguments += "-DRISH_AGENT_CORE_DIR=${rishAgentCoreDir.absolutePath}".toString()
-            cmakeTargets += "rish_agent_core_jni"
         }
         defaultConfig {
             externalNativeBuild {
                 cmake {
+                    // No targets filter: the app-level build must also produce
+                    // the framework's libappmodules.so (OnLoad.cpp), not just
+                    // the two rish JNI shims.
                     arguments(*cmakeArguments)
-                    targets(*cmakeTargets)
                 }
             }
         }
