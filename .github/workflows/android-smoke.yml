@@ -83,6 +83,18 @@ jobs:
         run: |
           APK=android/app/build/outputs/apk/release/app-release.apk
           unzip -l "$APK" | grep -E "libappmodules\.so|librish_ffi\.so|librish_guest_jni\.so"
+      - name: Build debug androidTest APK and run workspace acceptance
+        run: |
+          cd android
+          ./gradlew assembleDebug assembleDebugAndroidTest -PreactNativeArchitectures=x86_64 -PrishStandalone=true
+      - name: Run workspace acceptance on the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: sh "$GITHUB_WORKSPACE/.github/scripts/workspace-acceptance.sh"
       - name: Boot emulator and launch the app
         uses: reactivecircus/android-emulator-runner@v2
         with:
