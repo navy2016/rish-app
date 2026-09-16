@@ -207,7 +207,7 @@ class LocalWorkspacesModule(private val react: ReactApplicationContext) :
         }
     }
 
-    override fun onActivityResult(activity: Activity?, requestCode: Int, resultCode: Int, data: Intent?) {
+    override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode != PICKER_REQUEST) return
         val active = synchronized(this) { val current = pending; pending = null; current } ?: return
         if (resultCode != Activity.RESULT_OK || data?.data == null) {
@@ -239,7 +239,7 @@ class LocalWorkspacesModule(private val react: ReactApplicationContext) :
         }
     }
 
-    override fun onNewIntent(intent: Intent?) = Unit
+    override fun onNewIntent(intent: Intent) = Unit
 
     override fun invalidate() {
         react.removeActivityEventListener(this)
@@ -266,7 +266,8 @@ class LocalWorkspacesModule(private val react: ReactApplicationContext) :
     }
 
     private fun sanitize(value: String): String {
-        val folded = value.normalize().trim().replace('/', '-').replace('\\', '-').replace(":", "-")
+        val folded = java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFC)
+            .trim().replace('/', '-').replace('\\', '-').replace(":", "-")
         val bounded = if (folded.toByteArray(Charsets.UTF_8).size > 100) folded.take(40) else folded
         return if (bounded.isEmpty() || bounded.startsWith('.')) "Android folder" else bounded
     }

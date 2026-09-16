@@ -80,7 +80,7 @@ internal class AndroidWorkspaceStore private constructor(private val context: Co
 
     private fun validName(value: String): Boolean {
         if (value.isEmpty() || value.toByteArray(StandardCharsets.UTF_8).size > 120) return false
-        if (value != value.trim() || value.normalize() != value) return false
+        if (value != value.trim() || java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFC) != value) return false
         if (value.startsWith('.') || value.equals("rish workspaces", true) || value.startsWith(".rish-", true)) return false
         return value.none { it.code <= 0x1f || it.code == 0x7f || it == '/' || it == '\\' || it == ':' }
     }
@@ -606,7 +606,7 @@ internal class AndroidWorkspaceStore private constructor(private val context: Co
                 else -> "${content.count { it == '\n' }} $name\n"
             }
             "head" -> content.lineSequence().take(options.optInt("lines", 40)).joinToString("\n")
-            "tail" -> content.lineSequence().takeLast(options.optInt("lines", 40)).joinToString("\n")
+            "tail" -> content.lines().takeLast(options.optInt("lines", 40)).joinToString("\n")
             else -> {
                 val pattern = options.optString("pattern", "")
                 val insensitive = options.optBoolean("case_insensitive", false)
