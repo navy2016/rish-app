@@ -12,6 +12,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import tech.zseven.rish.runtime.AndroidAgentWal
 import tech.zseven.rish.runtime.AndroidPreparedAttemptStore
+import tech.zseven.rish.runtime.AndroidRuntimeState
 import tech.zseven.rish.runtime.AndroidSessionStore
 import tech.zseven.rish.runtime.RishAgentCoreNative
 import java.io.File
@@ -291,6 +292,33 @@ class AndroidPreparedAttemptStoreTest {
         assertEquals("conflict", result.optString("status"))
         assertEquals("E_AGENT_CONFLICT", result.optString("failure_code"))
         assertEquals(before, wal.snapshot().getLong("generation"))
+    }
+
+    /**
+     * The bridge module serves the operation rather than rejecting it, and the
+     * answer that reaches JS is the core's own: `not_agent` / `E_AGENT_NO_ROOT`
+     * for a rootless attempt. `implemented` stays false, because one served
+     * operation is not the whole agent surface and the JS layer reads that
+     * constant as "all of it is here".
+     */
+    @Test fun theBridgeServesAPreparedAttemptOnTheRealRuntimeState() {
+        assertTrue(RishAgentCoreNative.available)
+        val runtime = AndroidRuntimeState.get(context)
+        val ids = Ids()
+        // The shared session store is whatever this device already has, so the
+        // checkpoint is taken from a session committed through it.
+        val snapshot = commitSession(runtime.sessions, ids)
+        val before = runtime.agentWal.snapshot().getLong("generation")
+        val result = runtime.preparedAttempts.prepareAgentAttempt(request(snapshot, ids))
+        assertEquals("not_agent", result.optString("status"))
+        assertEquals("E_AGENT_NO_ROOT", result.optString("failure_code"))
+        // It is a durable commit, not an in-memory answer.
+        assertNotEquals(before, runtime.agentWal.snapshot().getLong("generation"))
+        val operations = runtime.agentWal.snapshot().getJSONArray("operations")
+        assertEquals(
+            "rejected",
+            operations.getJSONObject(operations.length() - 1).getString("state"),
+        )
     }
 
     @Test fun anAttemptHasNoAuthorityToFind() = fixture { sessions, _, store ->

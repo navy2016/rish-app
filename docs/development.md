@@ -1110,6 +1110,23 @@ to 25. `the_reducer_answers_every_op_it_claims_to` now drives every op through
 `reduce_json` itself and fails against that bug. **A reducer needs a test that
 goes through the reducer**, not only through the functions behind it.
 
+### Android serves its first agent operation
+
+`AgentRuntime.prepare_agent_attempt` is no longer a rejection on Android. It
+reads the committed session and writes the agent WAL through the shared core,
+exactly as iOS does.
+
+Every attempt there is **rootless**, because Android resolves no workspace
+root, so the core commits it as `not_agent` / `E_AGENT_NO_ROOT`. That is a
+definite answer — "this attempt gets no agent authority" — and it is a
+different thing from `E_AGENT_NATIVE`, which says "there is no agent engine
+here". The controller can treat an Android chat as an attempt without tools
+rather than as a platform without an engine.
+
+`implemented` stays `false`. The JS layer reads that constant as "the whole
+agent surface is available", and one served operation is not that. The rest of
+the surface still rejects.
+
 ### The cross-store seam, and what covers it
 
 `prepare_agent_attempt` is the only operation that reads the committed session
