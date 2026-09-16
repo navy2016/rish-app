@@ -13,7 +13,7 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: apps/mobile
@@ -37,11 +37,42 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
       - name: Install dependencies
         run: npm ci --ignore-scripts
+      - name: Prepare zsh and pinned Rust 1.94
+        working-directory: .
+        run: |
+          if ! command -v zsh >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq zsh
+          fi
+          rustup toolchain install 1.94 --profile minimal
+          rustup target add --toolchain 1.94 aarch64-linux-android
+          rustc +1.94 -vV | sed -n '1p;/^release:/p;/^commit-hash:/p'
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('scripts/prepare-rish-android.sh', 'modules/rish/core/Cargo.lock') }}
       - name: Ensure Android SDK components
         run: |
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          "$SDKM" --list 2>/dev/null | grep -E "^  (platforms;android-37|build-tools;37|ndk;27\.1)" | head -20 || true
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
           "$SDKM" --install "platforms;android-37.0" "build-tools;37.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+      - name: Stage rish guest runtime (librish_ffi.so, arm64)
+        working-directory: .
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.1.12297006"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          zsh scripts/prepare-rish-android.sh
+          ls -la apps/mobile/android/rish-ffi apps/mobile/android/rish-ffi/jniLibs/arm64-v8a
+      - name: Stage rish shared agent core (librish_agent_ffi.so, arm64)
+        working-directory: .
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.1.12297006"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          zsh scripts/prepare-rish-agent-core-android.sh
+          ls -la apps/mobile/android/rish-agent-core apps/mobile/android/rish-agent-core/jniLibs/arm64-v8a
       - name: Decode release keystore
         working-directory: .
         env:
@@ -61,6 +92,7 @@ jobs:
         run: |
           APK=android/app/build/outputs/apk/release/app-release.apk
           test -f "$APK"
+          unzip -l "$APK" | grep -E "librish_ffi\.so|librish_agent_ffi\.so|librish_guest_jni\.so|librish_agent_core_jni\.so|rish-container\.cpio|vmlinuz"
           mkdir -p dist && cp "$APK" dist/rish-arm64-release.apk
           ls -la dist/
       - name: Upload APK
