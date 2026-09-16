@@ -114,8 +114,13 @@ static NSString *const DSHPolicyFingerprint =
   XCTAssertNotNil(result); XCTAssertNil(error);
   [self assertSafeProjection:result];
   XCTAssertEqualObjects(result[@"root_fingerprint_sha256"], DSHPolicyFingerprint);
+  // A read-only workspace root offers every tool whose required capability it
+  // has. `list_runtime_environments` needs `file_read` and is `auto` next to
+  // `list_dir` and `read_file`, so it belongs here; installing or running a
+  // runtime needs `guest_service`, which this root does not have.
   XCTAssertEqualObjects(result[@"tools"], (@[
     @{@"name": @"list_dir", @"access": @"auto"},
+    @{@"name": @"list_runtime_environments", @"access": @"auto"},
     @{@"name": @"read_file", @"access": @"auto"},
     @{@"name": @"write_file", @"access": @"conversation_confirm"},
   ]));

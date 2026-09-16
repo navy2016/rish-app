@@ -166,6 +166,42 @@ Java_tech_zseven_rish_runtime_RishAgentCoreNative_sessionReduce(
                input_utf8.size()));
 }
 
+// DSHAgentHJ: the domain-separated digest of a canonical JSON value. Stores
+// need it to name an operation by its request, and there must be one
+// implementation of it.
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_hashJson(
+    JNIEnv *env, jclass, jstring tag, jstring json) {
+  std::string tag_utf8;
+  std::string json_utf8;
+  if (tag == nullptr || !JStringToUtf8(env, tag, &tag_utf8)) return nullptr;
+  if (json == nullptr || !JStringToUtf8(env, json, &json_utf8)) return nullptr;
+  return TakeOwnedReply(
+      env, rish_agent_hash_json(tag_utf8.data(), tag_utf8.size(),
+                                json_utf8.data(), json_utf8.size()));
+}
+
+// The prepared-attempt reducer, like the session one, takes the committed
+// session's exact bytes alongside its envelope: the rule is about those bytes,
+// not about a value that happens to encode to them.
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_preparedAttemptReduce(
+    JNIEnv *env, jclass, jstring request, jstring session) {
+  std::string request_utf8;
+  std::string session_utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &request_utf8)) {
+    return nullptr;
+  }
+  if (session != nullptr && !JStringToUtf8(env, session, &session_utf8)) {
+    return nullptr;
+  }
+  return TakeOwnedReply(
+      env, rish_agent_prepared_attempt_reduce(
+               request_utf8.data(), request_utf8.size(),
+               reinterpret_cast<const std::uint8_t *>(session_utf8.data()),
+               session_utf8.size()));
+}
+
 // The WAL reducers take a single JSON envelope, like every other reducer.
 extern "C" JNIEXPORT jstring JNICALL
 Java_tech_zseven_rish_runtime_RishAgentCoreNative_walStateReduce(

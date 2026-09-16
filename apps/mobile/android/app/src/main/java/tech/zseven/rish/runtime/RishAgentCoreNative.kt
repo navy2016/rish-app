@@ -92,6 +92,14 @@ internal object RishAgentCoreNative {
     /** Releases a handle. Zero is ignored. */
     @JvmStatic external fun walClose(handle: Long)
 
+    /** SHA-256 over "rish.<tag>.v1\0" and the canonical JSON, lowercase hex. */
+    @JvmStatic external fun hashJson(tag: String, json: String): String?
+
+    /** One prepared-attempt decision; `session` carries the committed
+     *  session's exact bytes for the `session` op. */
+    @JvmStatic external fun preparedAttemptReduce(
+        requestJson: String, session: String?): String?
+
     /** Canonical JSON of a JSON text, or null when it cannot be canonicalised. */
     @JvmStatic external fun canonicalJson(json: String): String?
 
@@ -157,6 +165,25 @@ internal object RishAgentCoreNative {
         if (!available) return null
         val reply = (if (operation) walOperationReduce(request.toString())
                      else walStateReduce(request.toString())) ?: return null
+        val parsed = JSONObject(reply)
+        return if (parsed.optBoolean("ok")) parsed else null
+    }
+
+    /** The domain-separated digest of a canonical JSON value. */
+    fun hash(tag: String, value: JSONObject): String {
+        requireAvailable()
+        return hashJson(tag, value.toString())
+            ?: error("the shared agent core could not digest a $tag value")
+    }
+
+    /**
+     * One prepared-attempt decision, or null on refusal. The reply carries the
+     * outcome; a refusal here is the core saying the request or the state is
+     * not one it will act on, never a reason to decide locally.
+     */
+    fun preparedAttempt(request: JSONObject, session: String? = null): JSONObject? {
+        if (!available) return null
+        val reply = preparedAttemptReduce(request.toString(), session) ?: return null
         val parsed = JSONObject(reply)
         return if (parsed.optBoolean("ok")) parsed else null
     }

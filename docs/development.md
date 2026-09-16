@@ -944,6 +944,78 @@ Nothing recomputes a stored preview and compares it, so this is not a
 compatibility change: an old receipt keeps the text it was written with, and
 the preview's shape is unchanged.
 
+### The cross-store seam, and what covers it
+
+`prepare_agent_attempt` is the only operation that reads the committed session
+and writes the agent WAL in one breath, and the two stores are not atomic with
+each other: the session is SQLite, the WAL is a file. The window between "the
+session says generation N" and "the WAL has committed an operation bound to N"
+is the one place in the engine where a crash can leave them disagreeing, and
+until now nothing exercised it on either platform.
+
+`AndroidPreparedAttemptStore` plus `AndroidPreparedAttemptStoreTest` cover it —
+with a scope that has to be stated, not assumed. Android can resolve no root,
+so every attempt there is rootless, and the core commits a rootless attempt as
+`not_agent` / `E_AGENT_NO_ROOT` with the operation in state `rejected`, no
+authority and no transcript. **So this is the seam on the rejection path only.**
+It covers the session read, the checkpoint relation, the durable WAL write,
+replay of the same operation, and a fresh process finding the committed
+operation rather than repeating it. It says nothing about successful authority
+creation, which still needs the rooted iOS coverage.
+
+Three things the session fixture had to get right, each of which cost a round
+trip through the emulator before it was found by feeding the same bytes to the
+core directly:
+
+- **An attempt belongs to a turn.** `turns` is not decoration: the attempt's
+  `turn_id` must name one, the turn must list the attempt, and the turn's
+  `user_message_id` fixes exactly which messages the attempt may claim as
+  visible.
+- **A prepared attempt with no rounds carries no `visible_history_sha256`.**
+  The digest only becomes meaningful once a round was sent; the schema refuses
+  one without that provenance.
+- **The committed session's bytes must be canonical.** The prepared-attempt
+  store reads the *exact* bytes, so a fixture serialised in insertion order is
+  refused — as the real controller's bytes never would be.
+
+One branch is deliberately left uncovered and marked as such: the store refuses
+a request naming a workspace with `E_AGENT_ROOT_STALE`, but that branch is
+unreachable on Android today, because `session_matches` runs first and a stored
+attempt can never carry a workspace here — `AndroidSessionStore` refuses to
+persist a workspace-bound session at all. The request conflicts before the root
+is ever consulted. The branch stays because it states the platform limit
+honestly, but it is not covered and is not counted as covered.
+
+### Where model output becomes executable
+
+`DSHParseCompletionResponseSchema2` turned a provider's reply into the tool
+calls the engine runs. That is the boundary where untrusted model output
+becomes something executable — a call that gets through it is a call a person
+will be asked to approve — so it is now `completion_response.rs`
+(`rish_agent_completion_response_reduce`) and there is one copy of it.
+
+Unlike the store reducers it answers with a `failure_code`, not a store error
+code: a provider reply is not a store operation, and the controller uses these
+to decide whether a retry could possibly help.
+
+Two host facts stay behind, because the core cannot know them: whether a model
+is in this build's catalogue, and a fresh identifier for the compatibility
+path. Everything else is rule, including four worth naming:
+
+- **A length-limited reply never yields an executable call.** A reply cut off
+  mid-argument can still be syntactically valid JSON; running it would run a
+  call the model never finished writing.
+- **A tool call comes with the reasoning that produced it**, unless thinking
+  was off — the one exception being the compatibility path, which never had a
+  tool channel and so never had reasoning either.
+- **The compatibility path is deliberately narrow.** A model that describes a
+  call in prose is honoured only in two exact shapes, only when it sent no real
+  calls at all. Anything looser and ordinary prose that happens to be JSON
+  would become an executable call.
+- **Only omission means create-only.** An explicit `expected_revision`,
+  including a placeholder string, survives parsing so tool preparation can
+  report it; coercing it to null would turn a malformed update into a create.
+
 ### Predicting the commit id
 
 `AgentGitToolExecutor.mm` keeps libgit2 and hands the rest to `git_tool.rs`

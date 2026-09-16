@@ -14,6 +14,7 @@
 //! transaction, and the bounded primitive validators it needs ([`schema`]).
 
 pub mod canonical;
+pub mod completion_response;
 pub mod execution_ledger;
 pub mod git_tool;
 pub mod ledger_batch;

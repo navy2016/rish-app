@@ -1,6 +1,8 @@
 #import "DSHCompletionV2.h"
 #import "RishHarnessCatalog.h"
 
+#include "rish_agent_core.h"
+
 #include <math.h>
 #include <string.h>
 
@@ -906,7 +908,14 @@ DSHCompletionEnvelopeSchema3FromDictionary(NSDictionary *envelope,
   };
 }
 
-NSDictionary<NSString *, id> * _Nullable
+// Turning a provider's reply into tool calls the engine will run lives in the
+// shared core (modules/rish/core, `rish_agent_completion_response_reduce`).
+// This is the boundary where untrusted model output becomes something
+// executable — a call that gets through it is a call a person will be asked to
+// approve — so there is one copy of the rule, and it is not this one.  What
+// stays here are the two facts only the host has: whether a model is in this
+// build's catalogue, and a fresh identifier for the compatibility path.
+NSDictionary<NSString *, id> *_Nullable
 DSHParseCompletionResponseSchema2(
     NSDictionary *decoded,
     NSString *requestedModel,
@@ -917,223 +926,43 @@ DSHParseCompletionResponseSchema2(
     DSHSchema2Fail(error, @"E_COMPLETION_RESPONSE_JSON");
     return nil;
   }
-  NSString *responseId = DSHV2String(decoded[@"id"]);
-  if (!DSHSchema2OpaqueIdentifier(responseId)) {
-    DSHSchema2Fail(error, @"E_COMPLETION_PROVIDER_RESPONSE_ID");
-    return nil;
-  }
   NSString *model = DSHV2String(decoded[@"model"]);
-  if (!DSHSchema2SupportedModel(model)) {
-    DSHSchema2Fail(error, @"E_COMPLETION_RESPONSE_MODEL");
-    return nil;
-  }
-  if (![model isEqualToString:requestedModel]) {
-    DSHSchema2Fail(error, @"E_COMPLETION_MODEL_MISMATCH");
-    return nil;
-  }
-  NSArray *choices = [decoded[@"choices"] isKindOfClass:NSArray.class]
-      ? decoded[@"choices"] : nil;
-  NSDictionary *choice = choices.count == 1 &&
-      [choices.firstObject isKindOfClass:NSDictionary.class]
-      ? choices.firstObject : nil;
-  NSDictionary *message = [choice[@"message"] isKindOfClass:NSDictionary.class]
-      ? choice[@"message"] : nil;
-  NSString *finish = DSHV2String(choice[@"finish_reason"]);
-  NSSet *allowedFinish = [NSSet setWithArray:
-      @[@"stop", @"tool_calls", @"length", @"content_filter"]];
-  if (choice == nil || message == nil ||
-      ![DSHV2String(message[@"role"]) isEqualToString:@"assistant"] ||
-      ![allowedFinish containsObject:finish]) {
-    DSHSchema2Fail(error, @"E_COMPLETION_EMPTY_RESPONSE");
-    return nil;
-  }
-  if ([finish isEqualToString:@"length"] &&
-      [message[@"tool_calls"] isKindOfClass:NSArray.class] &&
-      [message[@"tool_calls"] count] > 0) {
-    // A length-limited tool response is incomplete, even if its partial JSON
-    // happens to parse. Never expose executable calls from it.
-    DSHSchema2Fail(error, @"E_COMPLETION_LENGTH");
-    return nil;
-  }
-  NSString *text = nil;
-  id rawContent = message[@"content"];
-  // DeepSeek's required content field is nullable for a tool-only assistant
-  // response. All tool records and the finish relation are still validated
-  // below before this normalized empty string can leave the parser.
-  BOOL nullableToolContent = rawContent == NSNull.null &&
-      [finish isEqualToString:@"tool_calls"] &&
-      [message[@"tool_calls"] isKindOfClass:NSArray.class] &&
-      [message[@"tool_calls"] count] > 0;
-  if (nullableToolContent) text = @"";
-  else if (!DSHSchema2BoundedUTF8String(rawContent, 256 * 1024, &text)) {
-    DSHSchema2Fail(error, @"E_COMPLETION_EMPTY_RESPONSE");
-    return nil;
-  }
-  id rawReasoning = message[@"reasoning_content"];
-  NSString *reasoning = @"";
-  if (rawReasoning != nil && rawReasoning != NSNull.null &&
-      !DSHSchema2BoundedUTF8String(rawReasoning, 256 * 1024, &reasoning)) {
-    DSHSchema2Fail(error, @"E_COMPLETION_EMPTY_RESPONSE");
-    return nil;
-  }
-  id rawCalls = message[@"tool_calls"];
-  NSArray *calls = rawCalls == nil || rawCalls == NSNull.null ? @[] :
-      ([rawCalls isKindOfClass:NSArray.class] ? rawCalls : nil);
-  if (calls == nil || calls.count > 16) {
-    DSHSchema2Fail(error, @"E_COMPLETION_TOOL_CALL_INVALID");
-    return nil;
-  }
-  NSMutableArray *toolCalls = [NSMutableArray arrayWithCapacity:calls.count];
-  NSMutableSet *callIds = [NSMutableSet set];
-  for (NSUInteger callIndex = 0; callIndex < calls.count; callIndex += 1) {
-    id rawCall = calls[callIndex];
-    NSDictionary *call = [rawCall isKindOfClass:NSDictionary.class]
-        ? rawCall : nil;
-    NSDictionary *function =
-        [call[@"function"] isKindOfClass:NSDictionary.class]
-            ? call[@"function"] : nil;
-    NSString *identifier = DSHV2String(call[@"id"]);
-    NSString *name = DSHV2String(function[@"name"]);
-    NSString *arguments = nil;
-    BOOL baseCallExact = DSHSchema2ExactKeys(
-        call, @[@"id", @"type", @"function"]);
-    NSInteger providerCallIndex = -1;
-    NSMutableDictionary *callWithoutIndex = [call mutableCopy];
-    BOOL hasProviderCallIndex = callWithoutIndex[@"index"] != nil;
-    [callWithoutIndex removeObjectForKey:@"index"];
-    BOOL indexedCallExact = hasProviderCallIndex &&
-        DSHSchema2ExactKeys(callWithoutIndex, @[@"id", @"type", @"function"]) &&
-        DSHSchema2Integer(call[@"index"], 0, 15, &providerCallIndex) &&
-        providerCallIndex == (NSInteger)callIndex;
-    BOOL callExact = baseCallExact || indexedCallExact;
-    BOOL identifierOpaque = DSHSchema2OpaqueIdentifier(identifier);
-    BOOL identifierDuplicate = identifier != nil &&
-        [callIds containsObject:identifier];
-    BOOL typeFunction =
-        [DSHV2String(call[@"type"]) isEqualToString:@"function"];
-    BOOL functionExact = DSHSchema2ExactKeys(
-        function, @[@"name", @"arguments"]);
-    BOOL nameValid = DSHV2ValidToolName(name);
-    BOOL argumentsBounded = DSHSchema2BoundedUTF8String(
-        function[@"arguments"], DSHCompletionV2MaxArgumentsBytes, &arguments);
-    if (!callExact || !identifierOpaque || identifierDuplicate ||
-        !typeFunction || !functionExact || !nameValid || !argumentsBounded) {
-      DSHSchema2Fail(error, @"E_COMPLETION_TOOL_CALL_INVALID");
-      return nil;
-    }
-    if ([name isEqualToString:@"write_file"]) {
-      NSData *argumentBytes = [arguments dataUsingEncoding:NSUTF8StringEncoding];
-      id value = argumentBytes == nil ? nil :
-          [NSJSONSerialization JSONObjectWithData:argumentBytes
-                                          options:0 error:nil];
-      NSDictionary *parameters = [value isKindOfClass:NSDictionary.class]
-          ? value : nil;
-      NSDictionary *normalized = DSHSchema2NormalizeCreateOnlyWriteParameters(
-          name, parameters);
-      if (normalized != parameters) {
-        NSData *normalizedBytes = [NSJSONSerialization
-            dataWithJSONObject:normalized options:NSJSONWritingSortedKeys
-                         error:nil];
-        NSString *normalizedArguments = normalizedBytes == nil ? nil :
-            [[NSString alloc] initWithData:normalizedBytes
-                                  encoding:NSUTF8StringEncoding];
-        if (normalizedArguments != nil &&
-            normalizedBytes.length <= DSHCompletionV2MaxArgumentsBytes) {
-          arguments = normalizedArguments;
-        }
-      }
-    }
-    [callIds addObject:identifier];
-    [toolCalls addObject:@{
-      @"id": identifier, @"name": name, @"arguments": arguments,
-    }];
-  }
-  BOOL compatibilityCall = NO;
-  NSString *trimmed = [text stringByTrimmingCharactersInSet:
-      NSCharacterSet.whitespaceAndNewlineCharacterSet];
-  if (toolCalls.count == 0 &&
-      ([finish isEqualToString:@"stop"] ||
-       [finish isEqualToString:@"tool_calls"]) &&
-      trimmed.length > 0) {
-    NSData *compatibilityBytes = [trimmed dataUsingEncoding:NSUTF8StringEncoding];
-    NSError *compatibilityError = nil;
-    id compatibilityValue = compatibilityBytes == nil ? nil :
-        [NSJSONSerialization JSONObjectWithData:compatibilityBytes
-                                        options:0
-                                          error:&compatibilityError];
-    NSDictionary *compatibility =
-        [compatibilityValue isKindOfClass:NSDictionary.class]
-            ? compatibilityValue : nil;
-    BOOL longShape = compatibility != nil &&
-        DSHSchema2ExactKeys(compatibility,
-                            @[@"type", @"function", @"parameters"]) &&
-        [compatibility[@"type"] isEqualToString:@"function_call"] &&
-        [compatibility[@"parameters"] isKindOfClass:NSDictionary.class];
-    BOOL shortShape = compatibility != nil &&
-        DSHSchema2ExactKeys(compatibility, @[@"name", @"arguments"]) &&
-        [compatibility[@"arguments"] isKindOfClass:NSDictionary.class];
-    NSString *compatibilityName = longShape
-        ? DSHV2String(compatibility[@"function"])
-        : (shortShape ? DSHV2String(compatibility[@"name"]) : nil);
-    NSDictionary *parameters = longShape
-        ? compatibility[@"parameters"]
-        : (shortShape ? compatibility[@"arguments"] : nil);
-    parameters = DSHSchema2NormalizeCreateOnlyWriteParameters(
-        compatibilityName, parameters);
-    if ((longShape || shortShape) &&
-        DSHV2ValidToolName(compatibilityName) && parameters != nil) {
-      NSData *argumentData = [NSJSONSerialization
-          dataWithJSONObject:parameters
-                     options:NSJSONWritingSortedKeys
-                       error:&compatibilityError];
-      NSString *arguments = argumentData == nil ? nil :
-          [[NSString alloc] initWithData:argumentData
-                                encoding:NSUTF8StringEncoding];
-      NSString *callIdentifier = [@"compat:" stringByAppendingString:responseId];
-      if (!DSHSchema2OpaqueIdentifier(callIdentifier)) {
-        callIdentifier = [@"compat:" stringByAppendingString:
-            NSUUID.UUID.UUIDString.lowercaseString];
-      }
-      NSData *argumentBytes = [arguments dataUsingEncoding:NSUTF8StringEncoding];
-      if (arguments != nil && argumentBytes != nil &&
-          argumentBytes.length <= DSHCompletionV2MaxArgumentsBytes &&
-          DSHSchema2OpaqueIdentifier(callIdentifier)) {
-        [toolCalls addObject:@{
-          @"id" : callIdentifier,
-          @"name" : compatibilityName,
-          @"arguments" : arguments,
-        }];
-        finish = @"tool_calls";
-        text = @"";
-        trimmed = @"";
-        compatibilityCall = YES;
-      }
-    }
-  }
-  BOOL finishClaimsTools = [finish isEqualToString:@"tool_calls"];
-  if (finishClaimsTools != (toolCalls.count > 0)) {
-    DSHSchema2Fail(error, @"E_COMPLETION_FINISH_RELATION");
-    return nil;
-  }
-  if (finishClaimsTools && !compatibilityCall &&
-      ![thinkingMode isEqualToString:@"off"] &&
-      ![rawReasoning isKindOfClass:NSString.class]) {
-    DSHSchema2Fail(error, @"E_COMPLETION_FINISH_RELATION");
-    return nil;
-  }
-  if (([finish isEqualToString:@"stop"] ||
-       [finish isEqualToString:@"length"]) && trimmed.length == 0) {
-    DSHSchema2Fail(error, @"E_COMPLETION_FINISH_RELATION");
-    return nil;
-  }
-  return @{
-    @"provider_response_id": responseId,
-    @"model": model,
-    @"text": text,
-    @"reasoning": reasoning,
-    @"tool_calls": toolCalls,
-    @"finish_reason": finish,
+  NSDictionary *envelope = @{
+    @"op" : @"parse",
+    @"response" : decoded,
+    @"requested_model" : requestedModel ?: @"",
+    @"model_supported" : @(model != nil && DSHSchema2SupportedModel(model)),
+    @"thinking_mode" : thinkingMode ?: @"",
+    @"fallback_call_id" : NSUUID.UUID.UUIDString.lowercaseString,
   };
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_completion_response_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) {
+    DSHSchema2Fail(error, @"E_COMPLETION_RESPONSE_JSON");
+    return nil;
+  }
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  if (![reply isKindOfClass:NSDictionary.class]) {
+    DSHSchema2Fail(error, @"E_COMPLETION_RESPONSE_JSON");
+    return nil;
+  }
+  if (![reply[@"ok"] isEqual:@YES]) {
+    NSString *code = [reply[@"failure_code"] isKindOfClass:NSString.class]
+        ? reply[@"failure_code"] : @"E_COMPLETION_RESPONSE_JSON";
+    DSHSchema2Fail(error, code);
+    return nil;
+  }
+  id parsed = reply[@"parsed"];
+  if (![parsed isKindOfClass:NSDictionary.class]) {
+    DSHSchema2Fail(error, @"E_COMPLETION_RESPONSE_JSON");
+    return nil;
+  }
+  return parsed;
 }
 
 NSArray<NSDictionary<NSString *, id> *> *DSHCompletionNormalizeToolCalls(

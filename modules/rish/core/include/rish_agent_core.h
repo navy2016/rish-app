@@ -114,6 +114,14 @@ void rish_agent_wal_close(void *handle);
 /// to say and changes the toolset digest.
 char *rish_agent_tool_registry_reduce(const char *json, size_t json_length);
 
+/// Parses one provider completion response over
+/// {"op":"parse","response","requested_model","model_supported","thinking_mode",
+/// "fallback_call_id"}. This is where untrusted model output becomes something
+/// executable. The reply is {"ok":true,"parsed":{...}} or
+/// {"ok":false,"failure_code":"E_COMPLETION_..."} — a failure code, not a store
+/// error code, because a provider reply is not a store operation.
+char *rish_agent_completion_response_reduce(const char *json, size_t json_length);
+
 /// One Git-tool decision over {"op",...}: timezone_string, timezone_minutes,
 /// index_digest,
 /// commit_identity, failure_result. libgit2 stays with the host; which staged

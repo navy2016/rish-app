@@ -24,6 +24,12 @@ internal object AndroidSessionEnvironment {
         }
     }
 
+    /** Whether this build can talk to `model` at all, and through which
+     *  harness. Both are facts only the host has. */
+    fun isSupported(model: String): Boolean = harnessOrNull(model) != null
+
+    fun harnessIdFor(model: String): String? = harnessOrNull(model)
+
     private fun harnessOrNull(model: String): String? =
         try { AndroidProviderConfiguration.harness(model) } catch (_: IllegalStateException) { null }
 

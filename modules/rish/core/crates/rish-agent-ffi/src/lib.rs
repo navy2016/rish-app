@@ -4,6 +4,7 @@
 //! call from any thread and never panics across the boundary.
 
 use rish_agent_core::canonical::{canonical_json, hash_bytes, hash_json};
+use rish_agent_core::completion_response::reduce_json as completion_response_reduce_json;
 use rish_agent_core::git_tool::reduce_json as git_tool_reduce_json;
 use rish_agent_core::ledger_batch::reduce_json as ledger_batch_reduce_json;
 use rish_agent_core::ledger_ops::reduce_json as ledger_reduce_json;
@@ -290,6 +291,24 @@ pub unsafe extern "C" fn rish_agent_root_reduce(
         return std::ptr::null_mut();
     };
     output(root_reduce_json(text))
+}
+
+/// Parses one provider completion response over the JSON envelope documented
+/// on `rish_agent_core::completion_response::reduce_json`. Unlike the store
+/// reducers this answers with a `failure_code`, not a store error code: a
+/// provider reply is not a store operation.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_completion_response_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(completion_response_reduce_json(text))
 }
 
 /// Runs one Git-tool decision over the JSON envelope documented on
