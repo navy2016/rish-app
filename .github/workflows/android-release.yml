@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: rish-android-release
@@ -101,3 +101,14 @@ jobs:
           name: rish-arm64-release
           path: apps/mobile/dist/rish-arm64-release.apk
           if-no-files-found: error
+      - name: Publish APK to a GitHub Release
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="android-arm64-${{ github.run_number }}"
+          gh release create "$TAG" apps/mobile/dist/rish-arm64-release.apk \
+            --title "Rish Android arm64 (build ${{ github.run_number }})" \
+            --notes "Signed arm64-v8a release APK built from ${{ github.sha }}." \
+            --prerelease \
+          || gh release upload "$TAG" apps/mobile/dist/rish-arm64-release.apk --clobber
