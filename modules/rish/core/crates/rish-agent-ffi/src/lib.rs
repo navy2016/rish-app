@@ -24,6 +24,8 @@ use rish_agent_core::transcript_store::reduce_json as transcript_reduce_json;
 use rish_agent_core::wal_operations::reduce_json as wal_operation_reduce_json;
 use rish_agent_core::wal_resident::{Confirmation, Resident};
 use rish_agent_core::wal_state::reduce_json as wal_state_reduce_json;
+use rish_agent_core::workspace_fingerprint::reduce_json as workspace_fingerprint_reduce_json;
+use rish_agent_core::workspace_grants::reduce_json as workspace_grants_reduce_json;
 use rish_agent_core::workspace_tool::reduce_json as workspace_tool_reduce_json;
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -371,6 +373,40 @@ pub unsafe extern "C" fn rish_agent_git_tool_reduce(
         return std::ptr::null_mut();
     };
     output(git_tool_reduce_json(text))
+}
+
+/// Runs one workspace-grant decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_grants::reduce_json` — what a stored record is
+/// allowed to do, and how that is shown.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_grants_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_grants_reduce_json(text))
+}
+
+/// Runs one workspace root-fingerprint decision over the JSON envelope
+/// documented on `rish_agent_core::workspace_fingerprint::reduce_json` — what
+/// binds a workspace authority to a physical directory.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_fingerprint_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_fingerprint_reduce_json(text))
 }
 
 /// Runs one workspace-tool decision over the JSON envelope documented on

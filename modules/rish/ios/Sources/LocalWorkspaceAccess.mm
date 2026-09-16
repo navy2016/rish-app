@@ -5,6 +5,8 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <TargetConditionals.h>
 
+#include "rish_agent_core.h"
+
 #include <fcntl.h>
 #include <math.h>
 #include <sys/stdio.h>
@@ -386,6 +388,28 @@ static BOOL DSHCanonicalDisplayName(id value) {
 
 static BOOL DSHSafeDirectoryName(id value) {
   return DSHCanonicalDisplayName(value);
+}
+
+// Which grants a locator kind implies, and how they are projected, live in the
+// shared core (modules/rish/core, `rish_agent_workspace_grants_reduce`).
+// Deriving the *status* stays here: it resolves a security-scoped bookmark,
+// starts a scope and stats a directory, none of which travels. What a status
+// means does travel.
+static NSDictionary *DSHWorkspaceGrantsReduce(NSString *op,
+                                              NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_workspace_grants_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
 }
 
 static NSString *DSHSHA256(NSData *data) {
@@ -1996,49 +2020,30 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
 - (NSDictionary *)descriptorForRecord:(NSDictionary *)record
                                 status:(NSString *)status
                           capabilities:(nullable NSSet<NSString *> *)capabilities {
-  NSMutableDictionary *projectedCapabilities =
-      [[self zeroCapabilitiesForRecord:record] mutableCopy];
-  if ([status isEqual:@"ok"]) {
-    for (NSString *capability in capabilities ?: [NSSet set]) {
-      if (projectedCapabilities[capability] != nil) {
-        projectedCapabilities[capability] = @YES;
-      }
-    }
-  }
-  return @{
-    @"schema_version" : @2,
-    @"workspace_id" : record[@"workspace_id"],
-    @"display_name" : record[@"display_name"],
-    @"origin" : record[@"origin"],
-    @"status" : status,
-    @"binding_revision" : record[@"binding_revision"],
-    @"capabilities" : [projectedCapabilities copy],
-    @"created_at" : record[@"created_at"],
-    @"last_opened_at" : record[@"last_opened_at"],
-  };
+  return DSHWorkspaceGrantsReduce(@"descriptor", @{
+    @"record" : record ?: NSNull.null,
+    @"status" : status ?: NSNull.null,
+    @"grants" : (capabilities ?: [NSSet set]).allObjects,
+  })[@"descriptor"];
 }
 
 - (NSSet<NSString *> *)operationalCapabilitiesForMetadataRecord:(NSDictionary *)record
                                                         authority:(NSDictionary *)authority
                                                            status:(NSString *)status {
-  if (![status isEqual:@"ok"]) return [NSSet set];
-  NSString *locator = record[@"root_locator_kind"];
-  if ([locator isEqual:@"documents_owned"]) {
-    // Documents-owned roots are verified by the native split-git producer.
-    return [NSSet setWithArray:@[
-      @"read", @"write", @"git", @"project_context"
-    ]];
-  }
-  // Security-scoped roots currently have no native coordinated Git,
-  // Project Context, or Files producer. Keep the advertised contract honest
-  // until those consumers exist; coordinated access itself remains available
-  // for read/write only.
-  if ([locator isEqual:@"security_scoped"]) {
-    return [NSSet setWithArray:@[@"read", @"write"]];
-  }
-  if (![locator isEqual:@"legacy_app_owned"]) return [NSSet set];
-  return [self verifiedLegacyCapabilitiesForRecord:record authority:authority]
-      ?: [NSSet set];
+  // A legacy root's grants depend on re-reading its project metadata and
+  // comparing physical identity, which only this side can do; the answer is
+  // handed across rather than guessed at.
+  NSSet *legacy = [record[@"root_locator_kind"] isEqual:@"legacy_app_owned"]
+      ? [self verifiedLegacyCapabilitiesForRecord:record authority:authority]
+      : nil;
+  NSMutableDictionary *request = [@{
+    @"locator_kind" : record[@"root_locator_kind"] ?: NSNull.null,
+    @"status" : status ?: NSNull.null,
+  } mutableCopy];
+  if (legacy != nil) request[@"verified_legacy"] = legacy.allObjects;
+  id grants = DSHWorkspaceGrantsReduce(@"operational_grants", request)[@"grants"];
+  return [grants isKindOfClass:NSArray.class] ? [NSSet setWithArray:grants]
+                                              : [NSSet set];
 }
 
 - (nullable NSSet<NSString *> *)verifiedLegacyCapabilitiesForRecord:

@@ -386,9 +386,7 @@ fn control_and_format_paths_are_refused_without_rejecting_adjacent_unicode() {
 /// renders as a lone space. Odd-looking, and exactly what the original did.
 #[test]
 fn a_trailing_newline_is_a_line() {
-    let preview = diff_preview(Some("a\n"), "b\n", false)
-        .diff
-        .expect("diff");
+    let preview = diff_preview(Some("a\n"), "b\n", false).diff.expect("diff");
     assert_eq!(preview, "@@ -1,1 +1,1 @@\n-a\n+b\n ");
     // Without the trailing newline there is no such line and no such context.
     let preview = diff_preview(Some("a"), "b", false).diff.expect("diff");
@@ -402,10 +400,7 @@ fn the_hunk_header_names_where_the_change_starts_and_how_big_it_is() {
     let prior = "keep1\nkeep2\nold1\nold2\ntail1\ntail2";
     let next = "keep1\nkeep2\nnew1\ntail1\ntail2";
     let preview = diff_preview(Some(prior), next, false).diff.expect("diff");
-    assert!(
-        preview.starts_with("@@ -3,2 +3,1 @@"),
-        "{preview}"
-    );
+    assert!(preview.starts_with("@@ -3,2 +3,1 @@"), "{preview}");
 }
 
 /// Up to three unchanged lines either side, taken from the prior in both
@@ -414,9 +409,7 @@ fn the_hunk_header_names_where_the_change_starts_and_how_big_it_is() {
 fn three_lines_of_context_surround_the_change() {
     let prior: String = (0..12).map(|i| format!("line{i}\n")).collect();
     let next = prior.replace("line6\n", "CHANGED\n");
-    let preview = diff_preview(Some(&prior), &next, false)
-        .diff
-        .expect("diff");
+    let preview = diff_preview(Some(&prior), &next, false).diff.expect("diff");
     assert_eq!(
         preview,
         "@@ -7,1 +7,1 @@\n line3\n line4\n line5\n-line6\n+CHANGED\n line7\n line8\n line9"
@@ -472,15 +465,23 @@ fn a_change_past_the_line_bound_is_invisible_not_elided() {
 /// lands on a character boundary and the ellipsis is appended after it.
 #[test]
 fn an_oversized_preview_is_cut_to_half_the_budget() {
-    let prior: String = (0..40).map(|i| format!("old{i} {}\n", "x".repeat(200))).collect();
-    let next: String = (0..40).map(|i| format!("new{i} {}\n", "x".repeat(200))).collect();
+    let prior: String = (0..40)
+        .map(|i| format!("old{i} {}\n", "x".repeat(200)))
+        .collect();
+    let next: String = (0..40)
+        .map(|i| format!("new{i} {}\n", "x".repeat(200)))
+        .collect();
     let preview = diff_preview(Some(&prior), &next, false);
     let diff = preview.diff.expect("diff");
     assert!(preview.truncated);
     assert!(diff.ends_with("\n…"), "{}", &diff[diff.len() - 16..]);
     // Half the budget, plus the four bytes of "\n…".
     assert!(diff.len() <= 4096 / 2 + 4, "{}", diff.len());
-    assert!(diff.len() > 4096 / 2 - 8, "cut, not merely short: {}", diff.len());
+    assert!(
+        diff.len() > 4096 / 2 - 8,
+        "cut, not merely short: {}",
+        diff.len()
+    );
 }
 
 /// A file that gains or loses lines at one end still anchors on the unchanged

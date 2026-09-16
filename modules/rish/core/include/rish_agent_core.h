@@ -145,6 +145,18 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 /// crash between writing the object and recording it recoverable.
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 
+/// One workspace-grant decision over {"op",...}: operational_grants,
+/// descriptor. Which grants a locator kind implies and how they are shown;
+/// deriving the status itself stays with the host, because it resolves a
+/// bookmark and stats a directory.
+char *rish_agent_workspace_grants_reduce(const char *json, size_t json_length);
+
+/// One workspace root-fingerprint decision over {"op",...}: fingerprint,
+/// authority_digest, fingerprint_input, fingerprint_valid. This is what binds
+/// a workspace authority to a physical directory, so an authority written by
+/// one platform must validate on the other.
+char *rish_agent_workspace_fingerprint_reduce(const char *json, size_t json_length);
+
 /// One workspace-tool decision over {"op",...}: bounds, path_components,
 /// revision, directory_entry_decision, directory_listing, diff_preview,
 /// write_expected_prior, feedback, failure_result. The host owns the descriptors and the bytes; which paths it
