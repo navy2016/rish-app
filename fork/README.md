@@ -38,6 +38,7 @@ stage the guest runtime before any Gradle step.
 | `.../modules/LocalWorkspaceModule.kt` | upstream placeholder; the fork serves file operations (list/read/write/mkdir/rename/trash/restore/portable tools) |
 | `.../modules/LocalWorkspacesModule.kt` | upstream placeholder; the fork registers workspaces and drives the system folder picker (SAF) |
 | `.../runtime/AndroidWorkspaceStore.kt` | the fork's workspace authority + storage layer used by the three modules above |
+| `scripts/prepare-rish-agent-core-android.sh` | upstream hardcodes arm64-v8a; the overlay accepts `RISH_ANDROID_ABIS=x86_64` (same contract as `prepare-rish-android.sh`) so the smoke emulator stages a core and its session acceptance runs against the real core |
 | `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidWorkspaceStoreTest.kt` | device acceptance test run by the smoke workflow |
 | `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidRuntimeBootstrapTest.kt` | device acceptance test for the runtime probe (`bootstrapForHarness`) run by the smoke workflow |
 
