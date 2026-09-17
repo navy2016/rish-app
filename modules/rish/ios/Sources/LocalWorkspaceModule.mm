@@ -2,6 +2,8 @@
 #import <React/RCTBridgeModule.h>
 #import <CommonCrypto/CommonDigest.h>
 
+#include "rish_agent_core.h"
+
 #import "LocalProjectAccess.h"
 #import "LocalWorkspaceAccess.h"
 #import "LegacyBoundProjectRootAccess.h"
@@ -107,57 +109,46 @@ static NSError *LWProjectRelationError(NSError *error) {
   return LWError(DSHLocalWorkspaceAccessErrorRootChanged);
 }
 
+// Which code and message a workspace failure is reported as lives in the
+// shared core (modules/rish/core, `rish_agent_workspace_error_reduce`). This
+// file used to carry a third copy of that table, after LocalWorkspaceAccess
+// and the core itself.
+static NSDictionary *LWErrorProjection(NSInteger code) {
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:@{
+    @"op" : @"projection",
+    @"code" : @((unsigned long long)code),
+  } options:0 error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_workspace_error_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  if (![reply isKindOfClass:NSDictionary.class] ||
+      ![reply[@"ok"] isEqual:@YES]) {
+    return nil;
+  }
+  id projection = reply[@"projection"];
+  return [projection isKindOfClass:NSDictionary.class] ? projection : nil;
+}
+
 static NSString *LWStableCode(NSError *error) {
+  // An error that already carries a public code keeps it: it came from a layer
+  // that had already made this decision.
   NSString *code = [error.userInfo[@"code"] isKindOfClass:NSString.class]
       ? error.userInfo[@"code"] : nil;
   if (code != nil) return code;
-  switch ((DSHLocalWorkspaceAccessErrorCode)error.code) {
-    case DSHLocalWorkspaceAccessErrorInvalid: return @"E_WORKSPACE_INVALID";
-    case DSHLocalWorkspaceAccessErrorNotFound: return @"E_WORKSPACE_NOT_FOUND";
-    case DSHLocalWorkspaceAccessErrorBusy: return @"E_WORKSPACE_BUSY";
-    case DSHLocalWorkspaceAccessErrorPickerBusy: return @"E_WORKSPACE_PICKER_BUSY";
-    case DSHLocalWorkspaceAccessErrorSelectionExpired: return @"E_WORKSPACE_SELECTION_EXPIRED";
-    case DSHLocalWorkspaceAccessErrorRevisionStale: return @"E_WORKSPACE_REVISION_STALE";
-    case DSHLocalWorkspaceAccessErrorRevisionOverflow: return @"E_WORKSPACE_REVISION_OVERFLOW";
-    case DSHLocalWorkspaceAccessErrorStatusStale: return @"E_WORKSPACE_STATUS_STALE";
-    case DSHLocalWorkspaceAccessErrorRevoked: return @"E_WORKSPACE_REVOKED";
-    case DSHLocalWorkspaceAccessErrorUnavailable: return @"E_WORKSPACE_UNAVAILABLE";
-    case DSHLocalWorkspaceAccessErrorNotDownloaded: return @"E_WORKSPACE_NOT_DOWNLOADED";
-    case DSHLocalWorkspaceAccessErrorImportRequired: return @"E_WORKSPACE_IMPORT_REQUIRED";
-    case DSHLocalWorkspaceAccessErrorCapability: return @"E_WORKSPACE_CAPABILITY";
-    case DSHLocalWorkspaceAccessErrorRootChanged: return @"E_WORKSPACE_ROOT_CHANGED";
-    case DSHLocalWorkspaceAccessErrorReferenced: return @"E_WORKSPACE_REFERENCED";
-    case DSHLocalWorkspaceAccessErrorConfirmation: return @"E_WORKSPACE_CONFIRMATION";
-    case DSHLocalWorkspaceAccessErrorConflict: return @"E_WORKSPACE_CONFLICT";
-    case DSHLocalWorkspaceAccessErrorPersistence: return @"E_WORKSPACE_PERSISTENCE";
-    case DSHLocalWorkspaceAccessErrorIO: return @"E_WORKSPACE_IO";
-  }
-  return @"E_WORKSPACE_UNAVAILABLE";
+  NSDictionary *projection = LWErrorProjection(error.code);
+  return projection[@"code"] ?: @"E_WORKSPACE_UNAVAILABLE";
 }
 
 static NSString *LWMessageForCode(NSString *code) {
-  NSDictionary *messages = @{
-    @"E_WORKSPACE_INVALID": @"Workspace request is invalid.",
-    @"E_WORKSPACE_NOT_FOUND": @"Workspace is not available.",
-    @"E_WORKSPACE_BUSY": @"Workspace storage is busy.",
-    @"E_WORKSPACE_PICKER_BUSY": @"Another workspace picker operation is active.",
-    @"E_WORKSPACE_SELECTION_EXPIRED": @"Workspace picker selection has expired.",
-    @"E_WORKSPACE_REVISION_STALE": @"Workspace binding is stale.",
-    @"E_WORKSPACE_REVISION_OVERFLOW": @"Workspace binding cannot be advanced.",
-    @"E_WORKSPACE_STATUS_STALE": @"Workspace authority is stale.",
-    @"E_WORKSPACE_REVOKED": @"Workspace authority was revoked.",
-    @"E_WORKSPACE_UNAVAILABLE": @"Workspace is unavailable.",
-    @"E_WORKSPACE_NOT_DOWNLOADED": @"Workspace content is not downloaded.",
-    @"E_WORKSPACE_IMPORT_REQUIRED": @"Workspace import is required.",
-    @"E_WORKSPACE_CAPABILITY": @"Workspace capability is unavailable.",
-    @"E_WORKSPACE_ROOT_CHANGED": @"Workspace root changed.",
-    @"E_WORKSPACE_REFERENCED": @"Workspace is still referenced.",
-    @"E_WORKSPACE_CONFIRMATION": @"Workspace confirmation is invalid.",
-    @"E_WORKSPACE_CONFLICT": @"Workspace storage changed concurrently.",
-    @"E_WORKSPACE_PERSISTENCE": @"Workspace storage is invalid.",
-    @"E_WORKSPACE_IO": @"Workspace operation failed.",
-  };
-  return messages[code] ?: messages[@"E_WORKSPACE_UNAVAILABLE"];
+  for (NSUInteger number = 1; number <= 19; number += 1) {
+    NSDictionary *projection = LWErrorProjection((NSInteger)number);
+    if ([projection[@"code"] isEqual:code]) return projection[@"message"];
+  }
+  return @"Workspace is unavailable.";
 }
 
 static BOOL LWIsBooleanNumber(id value) {
@@ -205,27 +196,33 @@ static BOOL LWDigest(id value) {
   return [regex firstMatchInString:string options:0 range:NSMakeRange(0, string.length)] != nil;
 }
 
+static NSDictionary *LWReadToolsReduce(NSString *op, NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_workspace_read_tools_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
 static BOOL LWToolOptionsValid(NSDictionary *options) {
-  if (![options isKindOfClass:NSDictionary.class]) return NO;
-  NSSet *allowed = [NSSet setWithArray:@[@"lines", @"metric", @"pattern", @"case_insensitive"]];
-  for (NSString *key in options) {
-    if (![key isKindOfClass:NSString.class] || ![allowed containsObject:key]) return NO;
-  }
-  id lines = options[@"lines"];
-  if (lines != nil && (!LWIsSafeInteger(lines, NO) || [lines unsignedIntegerValue] > 1000)) return NO;
-  id metric = options[@"metric"];
-  if (metric != nil && !([metric isEqual:@"lines"] || [metric isEqual:@"words"] || [metric isEqual:@"bytes"])) return NO;
-  id pattern = options[@"pattern"];
-  if (pattern != nil && (![pattern isKindOfClass:NSString.class] || [pattern lengthOfBytesUsingEncoding:NSUTF8StringEncoding] == 0 || [pattern lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 1024)) return NO;
-  id insensitive = options[@"case_insensitive"];
-  if (insensitive != nil && !LWIsBooleanNumber(insensitive)) return NO;
-  return YES;
+  return [LWReadToolsReduce(@"tool_options_valid", @{
+    @"options" : [options isKindOfClass:NSDictionary.class] ? options
+                                                            : NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static BOOL LWToolNameValid(NSString *tool) {
-  return [tool isEqual:@"cat"] || [tool isEqual:@"grep"] ||
-      [tool isEqual:@"head"] || [tool isEqual:@"tail"] ||
-      [tool isEqual:@"wc"] || [tool isEqual:@"sha256sum"];
+  return [LWReadToolsReduce(@"tool_name_valid", @{
+    @"value" : tool ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static NSData *LWBytesFromArray(id value) {

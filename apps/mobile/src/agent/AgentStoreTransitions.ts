@@ -1439,7 +1439,7 @@ function validateBatchResult(value: unknown, request: PrepareAgentToolBatchReque
   if (raw.status === 'rejected') {
     const result = exact(raw, ['schema_version', 'status', 'operation_id', 'failure_code', 'expected_batch_revision', 'expected_reserved_write_bytes', 'result_reserved_write_bytes', 'effect_gate', 'reservation_status', 'effect_dispatched', 'retry_advice']);
     if (result === null || result.schema_version !== 2 || result.operation_id !== request.operation_id ||
-      !enumValue(result.failure_code, ['E_AGENT_BAD_ARGUMENTS', 'E_AGENT_BAD_PATH', 'E_AGENT_CAPABILITY', 'E_AGENT_CONFLICT', 'E_AGENT_CAPACITY', 'E_AGENT_LEDGER', 'E_AGENT_ROOT_STALE', 'E_AGENT_ROUND_LIMIT'] as const) ||
+      !enumValue(result.failure_code, ['E_AGENT_BAD_ARGUMENTS', 'E_AGENT_BAD_PATH', 'E_AGENT_CAPABILITY', 'E_AGENT_CONFLICT', 'E_AGENT_CAPACITY', 'E_AGENT_LEDGER', 'E_AGENT_PERSISTENCE', 'E_AGENT_ROOT_STALE', 'E_AGENT_ROUND_LIMIT'] as const) ||
       result.expected_batch_revision !== request.expected_batch_revision ||
       result.expected_reserved_write_bytes !== request.expected_reserved_write_bytes ||
       !safeInteger(result.result_reserved_write_bytes, 4194304) ||
@@ -1448,6 +1448,7 @@ function validateBatchResult(value: unknown, request: PrepareAgentToolBatchReque
       result.reservation_status !== 'unchanged' || result.effect_dispatched !== false ||
       !enumValue(result.retry_advice, ['none', 'requery', 'wait_for_reconciliation'] as const)) return null;
     const expectedAdvice = result.failure_code === 'E_AGENT_CAPACITY' || result.failure_code === 'E_AGENT_LEDGER'
+      || result.failure_code === 'E_AGENT_PERSISTENCE'
       ? 'wait_for_reconciliation'
       : result.failure_code === 'E_AGENT_CONFLICT' || result.failure_code === 'E_AGENT_ROOT_STALE'
         ? 'requery'

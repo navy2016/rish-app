@@ -82,11 +82,21 @@ internal class AndroidSessionStore(context: Context, name: String = "rish.sessio
     }
 
     /**
-     * Storage preserves opaque JSON bytes; it does not issue project,
-     * workspace, tool or Agent authority. Those native APIs remain closed on
-     * Android, so a candidate that carries their journals is refused here —
-     * a platform policy on top of the shared acceptance rules, not a
-     * different reading of them.
+     * Storage preserves opaque JSON bytes; it does not issue project, tool or
+     * Agent authority. Those native APIs remain closed on Android, so a
+     * candidate that carries their journals is refused here — a platform
+     * policy on top of the shared acceptance rules, not a different reading of
+     * them.
+     *
+     * **Workspace bindings are no longer among them.** Android has a workspace
+     * registry now, so a conversation may name a `workspace_id` and carry a
+     * `workspace_binding`; the shared schema already says what a well-formed
+     * one looks like, and whether the binding can still be *proved* is decided
+     * where it is used, not here. A session records what the person chose; the
+     * root resolver decides what that is still worth.
+     *
+     * `project_id` and `project_context` stay refused: there is no project
+     * subsystem to issue or verify them.
      */
     private fun refuseUnsupportedAuthority(parsed: JSONObject) {
         for (field in listOf("workspace_authority_outbox", "agent_transcript_cleanup_outbox", "session_events")) {
@@ -96,7 +106,7 @@ internal class AndroidSessionStore(context: Context, name: String = "rish.sessio
         parsed.optJSONArray("conversations")?.let { conversations ->
             for (index in 0 until conversations.length()) {
                 val conversation = conversations.getJSONObject(index)
-                for (field in listOf("project_id", "workspace_id", "workspace_binding", "project_context")) require(conversation.isNull(field))
+                for (field in listOf("project_id", "project_context")) require(conversation.isNull(field))
                 require((conversation.optJSONArray("agent_grants")?.length() ?: 0) == 0)
                 conversation.optJSONArray("attempts")?.let { attempts ->
                     for (i in 0 until attempts.length()) require(attempts.getJSONObject(i).isNull("agent"))

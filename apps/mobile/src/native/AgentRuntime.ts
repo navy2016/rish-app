@@ -589,6 +589,7 @@ export type PrepareAgentToolBatchResultV2 =
         | 'E_AGENT_CONFLICT'
         | 'E_AGENT_CAPACITY'
         | 'E_AGENT_LEDGER'
+        | 'E_AGENT_PERSISTENCE'
         | 'E_AGENT_ROOT_STALE'
         | 'E_AGENT_ROUND_LIMIT';
       readonly expected_batch_revision: number;
@@ -4402,6 +4403,7 @@ function validateBatchResult(
         'E_AGENT_CONFLICT',
         'E_AGENT_CAPACITY',
         'E_AGENT_LEDGER',
+        'E_AGENT_PERSISTENCE',
         'E_AGENT_ROOT_STALE',
         'E_AGENT_ROUND_LIMIT',
       ].includes(result.failure_code as string) ||

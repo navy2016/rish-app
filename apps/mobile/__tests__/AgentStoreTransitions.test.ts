@@ -1886,6 +1886,26 @@ describe('AgentStoreTransitions', () => {
         result: { ...rejected, retry_advice: 'none' },
       }),
     ).toBeNull();
+    // A store that could not write says so in its own code, so this layer has
+    // to carry it. It waits out the condition the way a capacity refusal does.
+    expect(
+      validateAgentStoreTransition({
+        operation: 'prepare_agent_tool_batch',
+        request,
+        result: { ...rejected, failure_code: 'E_AGENT_PERSISTENCE' as const },
+      })?.kind,
+    ).toBe('prepare_agent_tool_batch');
+    expect(
+      validateAgentStoreTransition({
+        operation: 'prepare_agent_tool_batch',
+        request,
+        result: {
+          ...rejected,
+          failure_code: 'E_AGENT_PERSISTENCE' as const,
+          retry_advice: 'requery' as const,
+        },
+      }),
+    ).toBeNull();
     expect(
       validateAgentStoreTransition({
         operation: 'prepare_agent_tool_batch',

@@ -8,6 +8,12 @@
 #import "../../../../modules/rish/ios/Sources/ProjectContextStore.h"
 #import "DSHTestStorageFixture.h"
 
+#import "../../../../modules/rish/ios/Sources/DSHWorkspaceCanonical.h"
+
+// The test target has no header search path into the core, so it is reached by
+// relative path; the symbols come from the linked pod.
+#include "../../../../modules/rish/core/include/rish_agent_core.h"
+
 #include <CommonCrypto/CommonDigest.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -15,6 +21,63 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+// The reference id that names a project-context snapshot used to be derived in
+// ProjectContextService.mm; it is the core's now. Nothing else pins that the
+// two agree: the prepare/commit round trips are self-consistent, so changing
+// the derivation's domain string changes every id and no existing test
+// notices. Verified — that mutation left all 106 ProjectContextWorkspaceV2
+// tests green.
+//
+// So this is a real parity test. The local function below is the original
+// algorithm, transcribed from the ObjC as it stood, running against Foundation
+// and CommonCrypto exactly as it did; the other side is the shared core. Same
+// inputs, same id, or an existing snapshot on a device stops being findable.
+static NSString *DSHOriginalReferenceId(NSDictionary *root,
+                                        NSString *rootFingerprint,
+                                        NSString *conversationId) {
+  NSData *body = DSHWorkspaceCanonicalJSONData(@{
+    @"root" : root,
+    @"root_fingerprint_sha256" : rootFingerprint,
+    @"conversation_id" : conversationId,
+  }, nil);
+  if (body == nil) return nil;
+  NSData *domain = [@"rish.project-context-reference.v2\0"
+      dataUsingEncoding:NSUTF8StringEncoding];
+  NSMutableData *preimage = [NSMutableData dataWithData:domain];
+  [preimage appendData:body];
+  uint8_t digest[CC_SHA256_DIGEST_LENGTH] = {};
+  CC_SHA256(preimage.bytes, (CC_LONG)preimage.length, digest);
+  digest[6] = (uint8_t)((digest[6] & 0x0f) | 0x40);
+  digest[8] = (uint8_t)((digest[8] & 0x3f) | 0x80);
+  return [NSString stringWithFormat:
+      @"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+      digest[0], digest[1], digest[2], digest[3], digest[4], digest[5],
+      digest[6], digest[7], digest[8], digest[9], digest[10], digest[11],
+      digest[12], digest[13], digest[14], digest[15]];
+}
+
+static NSString *DSHCoreReferenceId(NSDictionary *root,
+                                    NSString *rootFingerprint,
+                                    NSString *conversationId) {
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:@{
+    @"op" : @"reference_id",
+    @"root" : root,
+    @"root_fingerprint_sha256" : rootFingerprint,
+    @"conversation_id" : conversationId,
+  } options:0 error:nil];
+  if (bytes == nil) return nil;
+  char *raw = rish_agent_project_context_service_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  id derived = [reply isKindOfClass:NSDictionary.class] ? reply[@"reference_id"]
+                                                        : nil;
+  return [derived isKindOfClass:NSString.class] ? derived : nil;
+}
 
 static NSString *const DSHFixtureProjectA =
     @"11111111-1111-4111-8111-111111111111";
@@ -5812,5 +5875,50 @@ static NSString *DSHSHA256Hex(NSData *data) {
   XCTAssertEqualObjects([self repositoryState:fixture], before);
   XCTAssertEqualObjects([self recursiveProjectDigest:fixture], recursiveBefore);
 }
+
+
+// Same tuple through both implementations, for a spread of inputs. An id that
+// differed would make every snapshot already on a device unfindable.
+//
+// This is load-bearing, and it is known to be: it was written while a core
+// built with a changed derivation domain was still staged, and it failed on
+// all twelve tuples. The 106 ProjectContextWorkspaceV2 round trips passed
+// against that same core, because a round trip writes and reads with whatever
+// derivation it has — self-consistency is not parity.
+- (void)testReferenceIdMatchesTheOriginalDerivation {
+  NSArray<NSString *> *workspaces = @[
+    @"11111111-1111-4111-8111-111111111111",
+    @"22222222-2222-4222-8222-222222222222",
+  ];
+  NSArray *projects = @[
+    @"33333333-3333-4333-8333-333333333333",
+    NSNull.null,
+  ];
+  NSArray<NSNumber *> *revisions = @[@1, @7, @4503599627370495];
+  NSString *conversation = @"44444444-4444-4444-8444-444444444444";
+  NSString *fingerprint =
+      @"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+  NSUInteger compared = 0;
+  for (NSString *workspace in workspaces) {
+    for (id project in projects) {
+      for (NSNumber *revision in revisions) {
+        NSDictionary *root = @{
+          @"schema_version" : @1,
+          @"workspace_id" : workspace,
+          @"binding_revision" : revision,
+          @"project_id" : project,
+        };
+        NSString *original =
+            DSHOriginalReferenceId(root, fingerprint, conversation);
+        NSString *core = DSHCoreReferenceId(root, fingerprint, conversation);
+        XCTAssertNotNil(original, @"%@", root);
+        XCTAssertEqualObjects(core, original, @"%@", root);
+        compared += 1;
+      }
+    }
+  }
+  XCTAssertEqual(compared, (NSUInteger)12);
+}
+
 
 @end

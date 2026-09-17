@@ -1,5 +1,7 @@
 #import "ProjectContextStore.h"
 
+#include "rish_agent_core.h"
+
 #import <CommonCrypto/CommonDigest.h>
 
 #include <fcntl.h>
@@ -55,31 +57,40 @@ static void DSHSetStoreError(NSError **error,
 static NSString *const DSHPrepareNoPriorSnapshotId =
     @"00000000-0000-0000-0000-000000000000";
 
+// How the store names what it keeps, and what an interrupted prepare
+// transaction resolves to, live in the shared core (modules/rish/core,
+// `rish_agent_project_context_store_reduce`).
+static NSDictionary *DSHStoreReduce(NSString *op, NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_project_context_store_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
+static BOOL DSHStoreTextRule(NSString *op, id value) {
+  if (![value isKindOfClass:NSString.class]) return NO;
+  return [DSHStoreReduce(op, @{ @"value" : value })[@"valid"] isEqual:@YES];
+}
+
 static BOOL DSHStoreCanonicalId(NSString *value) {
-  if (![value isKindOfClass:NSString.class] || value.length != 36) return NO;
-  NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:value];
-  return uuid != nil &&
-         [uuid.UUIDString.lowercaseString isEqualToString:value] &&
-         ![value isEqual:DSHPrepareNoPriorSnapshotId];
+  return DSHStoreTextRule(@"canonical_snapshot_id", value);
 }
 
 static BOOL DSHStoreSafeReferenceKey(NSString *value) {
-  if (![value isKindOfClass:NSString.class] || value.length == 0 ||
-      value.length > 256) {
-    return NO;
-  }
-  NSCharacterSet *allowed = [NSCharacterSet
-      characterSetWithCharactersInString:
-          @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:-_."];
-  return [value rangeOfCharacterFromSet:allowed.invertedSet].location ==
-         NSNotFound;
+  return DSHStoreTextRule(@"safe_reference_key", value);
 }
 
 static BOOL DSHStoreHexDigest(NSString *value) {
-  if (![value isKindOfClass:NSString.class] || value.length != 64) return NO;
-  NSCharacterSet *hex =
-      [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
-  return [value rangeOfCharacterFromSet:hex.invertedSet].location == NSNotFound;
+  return DSHStoreTextRule(@"hex_digest", value);
 }
 
 static BOOL DSHStoreExactUnsignedInteger(NSNumber *value,
@@ -834,11 +845,11 @@ static BOOL DSHStoreDictionaryHasExactKeys(NSDictionary *object,
 }
 
 static NSString *DSHPrepareTransactionKey(NSString *activeReferenceKey) {
-  if (![activeReferenceKey hasPrefix:@"active:"]) return nil;
-  NSString *conversation = [activeReferenceKey substringFromIndex:@"active:".length];
-  return DSHStoreCanonicalId(conversation)
-      ? [@"txn:prepare:" stringByAppendingString:conversation]
-      : nil;
+  if (![activeReferenceKey isKindOfClass:NSString.class]) return nil;
+  id key = DSHStoreReduce(@"prepare_transaction_key", @{
+    @"active_key" : activeReferenceKey,
+  })[@"key"];
+  return [key isKindOfClass:NSString.class] ? key : nil;
 }
 
 - (BOOL)beginPrepareTransactionWithEnvelope:(NSData *)envelope

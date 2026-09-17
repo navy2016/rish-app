@@ -11,6 +11,14 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val credentials = AndroidCredentialStore(app)
     val configurations = AndroidProviderConfiguration(app)
     val sessions = AndroidSessionStore(app)
+    /// The agent WAL lives beside the session database, outside backup, in the
+    /// same bytes iOS writes. One root, because Android resolves none.
+    val agentWal = AndroidAgentWal(java.io.File(app.noBackupFilesDir, "agent"))
+    /// App-private workspace roots. Android resolves only these: no
+    /// security-scoped folders, no legacy projects, no rebinding yet.
+    val workspaces = AndroidWorkspaceRegistry(java.io.File(app.filesDir, "workspaces"))
+    val roots = AndroidAgentRootResolver(workspaces)
+    val preparedAttempts = AndroidPreparedAttemptStore(sessions, agentWal, roots)
     val transport = AndroidModelTransport(credentials, configurations)
     val subscriptionAuth = AndroidSubscriptionAuthManager(app)
     val io = Executors.newFixedThreadPool(2)

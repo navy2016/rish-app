@@ -126,10 +126,19 @@ static BOOL DSHContainerAnchorIsUUIDComponent(NSString *component) {
           deviceUUID, appUUID]];
   NSString *target =
       [root stringByAppendingString:@"/Library/Application Support"];
+  // The expected index is derived from the root, not written down: it is the
+  // last component of the container root, and NSHomeDirectory() sits at a
+  // different depth on different machines. The literal 12 this used to assert
+  // came from a shallower simulator home and failed everywhere else, which is
+  // what the anchor is supposed to make unnecessary.
+  NSUInteger expected = root.pathComponents.count - 1;
   NSUInteger segments = DSHContainerAnchorSegmentCountForPaths(target, root);
-  XCTAssertEqual(segments, (NSUInteger)12);
+  XCTAssertEqual(segments, expected);
   XCTAssertEqualObjects(target.pathComponents[segments], appUUID);
-  XCTAssertEqual(DSHContainerRootScanSegmentCount(target), (NSUInteger)12);
+  // The innermost app container wins: the CoreSimulator device UUID is
+  // further up the same path and must not be chosen.
+  XCTAssertNotEqualObjects(target.pathComponents[segments], deviceUUID);
+  XCTAssertEqual(DSHContainerRootScanSegmentCount(target), expected);
 }
 
 // Forged and malformed container shapes must be refused. This includes the

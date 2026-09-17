@@ -105,6 +105,7 @@
 		3DB8B837EE2427F645737D97 /* CompletionResponseParityTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 7A5FFC7805A8F7D447CD3979 /* CompletionResponseParityTests.mm */; };
 		148EFE74FBFDC9DE19262F42 /* AgentGitIndexPathTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 4F4CEB7B6A8B48A5A490FAFC /* AgentGitIndexPathTests.mm */; };
 		A1B2C3D40001AGENTROOTPROJ /* AgentRootProjectionTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40002AGENTROOTPROJ /* AgentRootProjectionTests.mm */; };
+		A1B2C3D40003WSFINGERPRINT /* WorkspaceFingerprintParityTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40004WSFINGERPRINT /* WorkspaceFingerprintParityTests.mm */; };
 		DEE0648D35C74E9B9982621D /* AgentWorkspaceParentTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 5E744DAD76CF2EC027D2AFB0 /* AgentWorkspaceParentTests.mm */; };
 		6A327D05F50BB85852DF6DEA /* RuntimeEnvironmentOwnershipTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 214DBD1C29E11C99F377C86E /* RuntimeEnvironmentOwnershipTests.mm */; };
 		21DD2488228C162C7770CA5E /* RuntimeServiceVMTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = DAA3900B34C5E357E2F218FF /* RuntimeServiceVMTests.mm */; };
@@ -262,6 +263,7 @@
 		7A5FFC7805A8F7D447CD3979 /* CompletionResponseParityTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CompletionResponseParityTests.mm; sourceTree = "<group>"; };
 		4F4CEB7B6A8B48A5A490FAFC /* AgentGitIndexPathTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentGitIndexPathTests.mm; sourceTree = "<group>"; };
 		A1B2C3D40002AGENTROOTPROJ /* AgentRootProjectionTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentRootProjectionTests.mm; sourceTree = "<group>"; };
+		A1B2C3D40004WSFINGERPRINT /* WorkspaceFingerprintParityTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = WorkspaceFingerprintParityTests.mm; sourceTree = "<group>"; };
 		5E744DAD76CF2EC027D2AFB0 /* AgentWorkspaceParentTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentWorkspaceParentTests.mm; sourceTree = "<group>"; };
 		214DBD1C29E11C99F377C86E /* RuntimeEnvironmentOwnershipTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RuntimeEnvironmentOwnershipTests.mm; sourceTree = "<group>"; };
 		DAA3900B34C5E357E2F218FF /* RuntimeServiceVMTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RuntimeServiceVMTests.mm; sourceTree = "<group>"; };
@@ -333,6 +335,7 @@
 				7A5FFC7805A8F7D447CD3979 /* CompletionResponseParityTests.mm */,
 				4F4CEB7B6A8B48A5A490FAFC /* AgentGitIndexPathTests.mm */,
 				A1B2C3D40002AGENTROOTPROJ /* AgentRootProjectionTests.mm */,
+				A1B2C3D40004WSFINGERPRINT /* WorkspaceFingerprintParityTests.mm */,
 				FD5F2DA2EF087B3E88300FA1 /* CompletionWriteRevisionTests.mm */,
 				BBE400031AD99517003FC87E /* RuntimeEnvironmentStoreTests.mm */,
 				A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */,
@@ -825,6 +828,7 @@
 				3DB8B837EE2427F645737D97 /* CompletionResponseParityTests.mm in Sources */,
 				148EFE74FBFDC9DE19262F42 /* AgentGitIndexPathTests.mm in Sources */,
 				A1B2C3D40001AGENTROOTPROJ /* AgentRootProjectionTests.mm in Sources */,
+				A1B2C3D40003WSFINGERPRINT /* WorkspaceFingerprintParityTests.mm in Sources */,
 				3F1B819D44893B93BD607E6F /* CompletionWriteRevisionTests.mm in Sources */,
 				BBE400041AD99517003FC87E /* RuntimeEnvironmentStoreTests.mm in Sources */,
 				A2C400021AD99517003FC87E /* AgentRuntimeModuleTests.mm in Sources */,

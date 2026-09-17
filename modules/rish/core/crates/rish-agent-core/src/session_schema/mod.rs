@@ -16,7 +16,9 @@ mod grant_reuse;
 pub(crate) use grant_recovery::frozen_ids_after_lost_prepare;
 pub(crate) use grant_reuse::frozen_ids_for_projection;
 mod primitives;
-mod scanner;
+// `pub(crate)` so `workspace_json` can assert, in its own tests, that the two
+// scanners really do differ rather than saying so only in a comment.
+pub(crate) mod scanner;
 mod validators;
 
 pub use primitives::*;

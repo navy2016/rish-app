@@ -167,13 +167,16 @@ static NSString *DSHFoldedString(NSString *value) {
 // Unicode case *folding* — not lowercasing — and the core carries no folding
 // table; the same shape as the foundation-json-v1 projection. So this side
 // folds, exactly as it always did, and passes the folded spellings across.
-static NSDictionary *DSHPolicyReduce(NSString *op, NSDictionary *fields) {
+static NSDictionary *DSHPolicyReduceWithContent(NSString *op,
+                                                NSDictionary *fields,
+                                                NSData *content) {
   NSMutableDictionary *envelope = [fields mutableCopy];
   envelope[@"op"] = op;
   NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
                                                     error:nil];
   char *raw = bytes == nil ? NULL : rish_agent_project_context_reduce(
-      (const char *)bytes.bytes, bytes.length);
+      (const char *)bytes.bytes, bytes.length,
+      (const uint8_t *)content.bytes, content.length);
   if (raw == NULL) return nil;
   NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
   rish_agent_string_free(raw);
@@ -181,6 +184,10 @@ static NSDictionary *DSHPolicyReduce(NSString *op, NSDictionary *fields) {
                                                 error:nil];
   return [reply isKindOfClass:NSDictionary.class] &&
       [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
+static NSDictionary *DSHPolicyReduce(NSString *op, NSDictionary *fields) {
+  return DSHPolicyReduceWithContent(op, fields, NSData.data);
 }
 
 /// One component as the core needs to see it: folded, plus the two Foundation
@@ -2237,37 +2244,20 @@ static NSComparisonResult DSHCompareCandidates(NSDictionary<NSString *, id> *lef
 }
 
 - (DSHProjectContextContentDecision *)decisionForContentData:(NSData *)data {
-  if (data.length > DSHProjectContextMaxFileBytes) {
+  // The order is the rule and it lives in the core: over budget is refused
+  // before the bytes are looked at, a NUL makes the file binary before it is
+  // decoded, and only then does encoding matter.
+  NSDictionary *reply = DSHPolicyReduceWithContent(@"content_decision", @{},
+                                                   data ?: NSData.data);
+  if (reply == nil) {
     return [[DSHProjectContextContentDecision alloc]
         initWithEligible:NO
-           omissionReason:DSHProjectContextOmissionReasonBudgetExceeded];
+           omissionReason:DSHProjectContextOmissionReasonBinary];
   }
-  const uint8_t *bytes = (const uint8_t *)data.bytes;
-  for (NSUInteger index = 0; index < data.length; index++) {
-    if (bytes[index] == 0) {
-      return [[DSHProjectContextContentDecision alloc]
-          initWithEligible:NO
-             omissionReason:DSHProjectContextOmissionReasonBinary];
-    }
-  }
-  NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-  if (text == nil) {
-    return [[DSHProjectContextContentDecision alloc]
-        initWithEligible:NO
-           omissionReason:DSHProjectContextOmissionReasonInvalidEncoding];
-  }
-  NSCharacterSet *controls = NSCharacterSet.controlCharacterSet;
-  for (NSUInteger index = 0; index < text.length; index++) {
-    unichar character = [text characterAtIndex:index];
-    if ([controls characterIsMember:character] && character != '\t' &&
-        character != '\n' && character != '\r' && character != '\f') {
-      return [[DSHProjectContextContentDecision alloc]
-          initWithEligible:NO
-             omissionReason:DSHProjectContextOmissionReasonBinary];
-    }
-  }
-  return [[DSHProjectContextContentDecision alloc] initWithEligible:YES
-                                                     omissionReason:nil];
+  id reason = reply[@"omission_reason"];
+  return [[DSHProjectContextContentDecision alloc]
+      initWithEligible:[reply[@"eligible"] isEqual:@YES]
+         omissionReason:[reason isKindOfClass:NSString.class] ? reason : nil];
 }
 
 - (DSHProjectContextSecretDecision *)secretDecisionForData:(NSData *)data {

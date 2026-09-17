@@ -101,6 +101,24 @@ internal object RishAgentCoreNative {
         requestJson: String, session: String?): String?
 
     /** Canonical JSON of a JSON text, or null when it cannot be canonicalised. */
+    @JvmStatic external fun workspaceJsonBoundedNative(bytes: ByteArray): Boolean
+
+    @JvmStatic external fun rootReduceNative(requestJson: String): String?
+
+    @JvmStatic external fun workspaceReceiptReduceNative(requestJson: String): String?
+
+    @JvmStatic external fun workspaceJournalReduceNative(requestJson: String): String?
+
+    @JvmStatic external fun workspaceRecordReduceNative(requestJson: String): String?
+
+    @JvmStatic external fun workspaceFingerprintReduceNative(requestJson: String): String?
+
+    @JvmStatic external fun workspaceGrantsReduceNative(requestJson: String): String?
+
+    @JvmStatic external fun workspaceAuthorityReduceNative(requestJson: String): String?
+
+    @JvmStatic external fun workspaceDirectoryNameReduceNative(requestJson: String): String?
+
     @JvmStatic external fun canonicalJson(json: String): String?
 
     /**
@@ -184,6 +202,58 @@ internal object RishAgentCoreNative {
     fun preparedAttempt(request: JSONObject, session: String? = null): JSONObject? {
         if (!available) return null
         val reply = preparedAttemptReduce(request.toString(), session) ?: return null
+        val parsed = JSONObject(reply)
+        return if (parsed.optBoolean("ok")) parsed else null
+    }
+
+    /**
+     * The five workspace reducers. Each takes an envelope naming an `op` and
+     * returns the reply, or null when the core refused it — which means the
+     * envelope was not one the rule acts on, never a licence to answer here.
+     *
+     * A host that cannot reach the core has no second set of workspace rules
+     * to fall back to, so it refuses too.
+     */
+    /**
+     * Whether stored bytes are JSON the engine will look at. Raw bytes, not an
+     * envelope: the question is about bytes that may not be JSON.
+     *
+     * A build without the core cannot answer, and answers no — refusing to
+     * read a file it cannot vet is the only honest option.
+     */
+    fun workspaceJsonBounded(bytes: ByteArray): Boolean =
+        available && workspaceJsonBoundedNative(bytes)
+
+    fun agentRoot(request: JSONObject): JSONObject? =
+        workspaceReply(request) { rootReduceNative(it) }
+
+    fun workspaceReceipt(request: JSONObject): JSONObject? =
+        workspaceReply(request) { workspaceReceiptReduceNative(it) }
+
+    fun workspaceJournal(request: JSONObject): JSONObject? =
+        workspaceReply(request) { workspaceJournalReduceNative(it) }
+
+    fun workspaceRecord(request: JSONObject): JSONObject? =
+        workspaceReply(request) { workspaceRecordReduceNative(it) }
+
+    fun workspaceFingerprint(request: JSONObject): JSONObject? =
+        workspaceReply(request) { workspaceFingerprintReduceNative(it) }
+
+    fun workspaceGrants(request: JSONObject): JSONObject? =
+        workspaceReply(request) { workspaceGrantsReduceNative(it) }
+
+    fun workspaceAuthority(request: JSONObject): JSONObject? =
+        workspaceReply(request) { workspaceAuthorityReduceNative(it) }
+
+    fun workspaceDirectoryName(request: JSONObject): JSONObject? =
+        workspaceReply(request) { workspaceDirectoryNameReduceNative(it) }
+
+    private inline fun workspaceReply(
+        request: JSONObject,
+        reduce: (String) -> String?,
+    ): JSONObject? {
+        if (!available) return null
+        val reply = reduce(request.toString()) ?: return null
         val parsed = JSONObject(reply)
         return if (parsed.optBoolean("ok")) parsed else null
     }

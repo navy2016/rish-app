@@ -893,6 +893,11 @@ pub fn prepare_ledger_failure(request: &Value, native_code: u8, prepared_calls: 
         "E_AGENT_BAD_ARGUMENTS"
     } else if native_code == StoreError::OwnerLost.code() {
         "E_AGENT_ROOT_STALE"
+    } else if native_code == StoreError::Persistence.code() {
+        // A store that could not write says so in a code every layer already
+        // carries. Reporting it as a ledger refusal hides the one cause the
+        // person holding the device can act on.
+        "E_AGENT_PERSISTENCE"
     } else {
         "E_AGENT_LEDGER"
     };
@@ -1556,6 +1561,34 @@ mod tests {
             tool_arguments_accepted(Some(&push), &ok).unwrap_err().1,
             "arguments_do_not_match_tool_schema"
         );
+    }
+
+    #[test]
+    fn ledger_failure_names_every_store_reason_it_can() {
+        let request = json!({
+            "operation_id": "op", "expected_batch_revision": 1,
+            "expected_reserved_write_bytes": 0,
+        });
+        let code = |store: StoreError| {
+            let result = prepare_ledger_failure(&request, store.code(), &[]);
+            (
+                as_str(get(&result, "failure_code")).unwrap().to_string(),
+                as_str(get(&result, "retry_advice")).unwrap().to_string(),
+            )
+        };
+        assert_eq!(code(StoreError::Capacity).0, "E_AGENT_CAPACITY");
+        assert_eq!(code(StoreError::Conflict), ("E_AGENT_CONFLICT".into(), "requery".into()));
+        assert_eq!(code(StoreError::InvalidArgument), ("E_AGENT_BAD_ARGUMENTS".into(), "none".into()));
+        assert_eq!(code(StoreError::OwnerLost), ("E_AGENT_ROOT_STALE".into(), "requery".into()));
+        assert_eq!(
+            code(StoreError::Persistence),
+            ("E_AGENT_PERSISTENCE".into(), "wait_for_reconciliation".into())
+        );
+        // These three have no code of their own; the ledger refusal is the
+        // honest answer for them, not a default the others fall through to.
+        for store in [StoreError::Corrupt, StoreError::Unavailable, StoreError::NotFound] {
+            assert_eq!(code(store).0, "E_AGENT_LEDGER", "{store:?}");
+        }
     }
 
     #[test]

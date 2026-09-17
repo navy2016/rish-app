@@ -373,3 +373,127 @@ fn control_and_format_paths_are_refused_without_rejecting_adjacent_unicode() {
         assert!(path_components(&format!("a{c}b"), false).is_some());
     }
 }
+
+// The approval preview's shape and bounds, pinned against
+// `DSHAgentApprovalUnifiedDiff` as it stood at 8e33d06 — the last commit
+// before it moved here. A person approves a write by reading this, so what
+// the bounds *hide* is as much the rule as what they show.
+
+/// Splitting on "\n" leaves a trailing empty line for a file that ends with a
+/// newline, and that empty line takes part in the anchoring like any other:
+/// it anchors the suffix, so one line changes rather than two, and it is then
+/// emitted as trailing context — a context line whose content is empty, which
+/// renders as a lone space. Odd-looking, and exactly what the original did.
+#[test]
+fn a_trailing_newline_is_a_line() {
+    let preview = diff_preview(Some("a\n"), "b\n", false).diff.expect("diff");
+    assert_eq!(preview, "@@ -1,1 +1,1 @@\n-a\n+b\n ");
+    // Without the trailing newline there is no such line and no such context.
+    let preview = diff_preview(Some("a"), "b", false).diff.expect("diff");
+    assert_eq!(preview, "@@ -1,1 +1,1 @@\n-a\n+b");
+}
+
+/// The header counts the removed and added lines and names the line the hunk
+/// starts at, one-based.
+#[test]
+fn the_hunk_header_names_where_the_change_starts_and_how_big_it_is() {
+    let prior = "keep1\nkeep2\nold1\nold2\ntail1\ntail2";
+    let next = "keep1\nkeep2\nnew1\ntail1\ntail2";
+    let preview = diff_preview(Some(prior), next, false).diff.expect("diff");
+    assert!(preview.starts_with("@@ -3,2 +3,1 @@"), "{preview}");
+}
+
+/// Up to three unchanged lines either side, taken from the prior in both
+/// cases, so the reader can see where the change sits.
+#[test]
+fn three_lines_of_context_surround_the_change() {
+    let prior: String = (0..12).map(|i| format!("line{i}\n")).collect();
+    let next = prior.replace("line6\n", "CHANGED\n");
+    let preview = diff_preview(Some(&prior), &next, false).diff.expect("diff");
+    assert_eq!(
+        preview,
+        "@@ -7,1 +7,1 @@\n line3\n line4\n line5\n-line6\n+CHANGED\n line7\n line8\n line9"
+    );
+    // Fewer than three available before the change is not an error.
+    let prior = "a\nb\nc";
+    let preview = diff_preview(Some(prior), "a\nB\nc", false)
+        .diff
+        .expect("diff");
+    assert_eq!(preview, "@@ -2,1 +2,1 @@\n a\n-b\n+B\n c");
+}
+
+/// At most 24 lines each way are shown, and the ellipsis says the rest was
+/// left out. It sits between the added lines and the trailing context.
+#[test]
+fn a_hunk_shows_at_most_twenty_four_lines_each_way() {
+    let prior: String = (0..30).map(|i| format!("old{i}\n")).collect();
+    let next: String = (0..30).map(|i| format!("new{i}\n")).collect();
+    let preview = diff_preview(Some(&prior), &next, false);
+    let diff = preview.diff.expect("diff");
+    assert!(preview.truncated, "a clipped hunk is a truncated preview");
+    assert_eq!(diff.matches("\n-").count(), 24);
+    assert_eq!(diff.matches("\n+").count(), 24);
+    assert!(diff.contains("\n…"), "{diff}");
+    assert!(diff.contains("-old23") && !diff.contains("-old24"));
+    // The header still counts the whole change, not the part shown.
+    assert!(diff.starts_with("@@ -1,30 +1,30 @@"), "{diff}");
+    // Exactly 24 is not truncation.
+    let prior: String = (0..24).map(|i| format!("old{i}\n")).collect();
+    let next: String = (0..24).map(|i| format!("new{i}\n")).collect();
+    let preview = diff_preview(Some(&prior), &next, false);
+    assert!(!preview.truncated);
+    assert!(!preview.diff.expect("diff").contains('…'));
+}
+
+/// Past 2,000 lines both sides are cut to the first 2,000 before anything is
+/// compared — so a change below that line is not merely elided from the hunk,
+/// it is never seen. The flag is the only thing that says so, which is why it
+/// may not be cleared.
+#[test]
+fn a_change_past_the_line_bound_is_invisible_not_elided() {
+    let prior: String = (0..2500).map(|i| format!("line{i}\n")).collect();
+    // The only difference is past the bound.
+    let next = prior.replace("line2400\n", "CHANGED\n");
+    let preview = diff_preview(Some(&prior), &next, false);
+    assert!(preview.truncated, "the reader has to be told");
+    // Within the first 2,000 lines the two are identical, so the diff is empty
+    // even though the files differ.
+    assert_eq!(preview.diff.as_deref(), Some(""));
+}
+
+/// Over the byte budget the preview is cut to half of it and marked. The cut
+/// lands on a character boundary and the ellipsis is appended after it.
+#[test]
+fn an_oversized_preview_is_cut_to_half_the_budget() {
+    let prior: String = (0..40)
+        .map(|i| format!("old{i} {}\n", "x".repeat(200)))
+        .collect();
+    let next: String = (0..40)
+        .map(|i| format!("new{i} {}\n", "x".repeat(200)))
+        .collect();
+    let preview = diff_preview(Some(&prior), &next, false);
+    let diff = preview.diff.expect("diff");
+    assert!(preview.truncated);
+    assert!(diff.ends_with("\n…"), "{}", &diff[diff.len() - 16..]);
+    // Half the budget, plus the four bytes of "\n…".
+    assert!(diff.len() <= 4096 / 2 + 4, "{}", diff.len());
+    assert!(
+        diff.len() > 4096 / 2 - 8,
+        "cut, not merely short: {}",
+        diff.len()
+    );
+}
+
+/// A file that gains or loses lines at one end still anchors on the unchanged
+/// part rather than reporting the whole file as changed.
+#[test]
+fn an_insertion_anchors_on_what_did_not_move() {
+    let preview = diff_preview(Some("a\nb\nc"), "a\nNEW\nb\nc", false)
+        .diff
+        .expect("diff");
+    assert_eq!(preview, "@@ -2,0 +2,1 @@\n a\n+NEW\n b\n c");
+    let preview = diff_preview(Some("a\nb\nc"), "a\nc", false)
+        .diff
+        .expect("diff");
+    assert_eq!(preview, "@@ -2,1 +2,0 @@\n a\n-b\n c");
+}

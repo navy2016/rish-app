@@ -17,19 +17,22 @@ import java.util.UUID
  * the request, what the operation row looks like, and whether this operation
  * already committed.
  *
- * **Scope.** Android has no workspace and no project subsystem, so a root
- * cannot be resolved here. A request naming one is refused as
- * `E_AGENT_ROOT_STALE`, which is what iOS answers when a root it was given can
- * no longer be proved. A rootless request is a first-class case and runs the
- * whole path — but the core commits it as `not_agent` / `E_AGENT_NO_ROOT` with
- * the operation in state `rejected`, creating no authority and no transcript.
- * So this covers the cross-store seam on the **rejection** path only. It is
- * not evidence about successful authority creation, and must not be read as
- * any.
+ * **Scope.** Android now has a workspace registry, so a request naming a
+ * workspace binding is resolved against it and, when the root still proves
+ * out, prepared for real — an authority, a transcript, the lot. A request
+ * naming a `project_id` is still refused as `E_AGENT_ROOT_STALE`: a project
+ * root needs an independently verified project lease and there is no project
+ * subsystem here.
+ *
+ * A rootless request remains a first-class case, and the core commits it as
+ * `not_agent` / `E_AGENT_NO_ROOT` with the operation in state `rejected`.
+ * A binding that cannot be proven is `E_AGENT_ROOT_STALE`, which is what iOS
+ * answers when a root it was given can no longer be proved.
  */
 internal class AndroidPreparedAttemptStore(
     private val sessions: AndroidSessionStore,
     private val wal: AndroidAgentWal,
+    private val roots: AndroidAgentRootResolver? = null,
 ) {
     private fun reduce(op: String, fields: JSONObject, session: String? = null): JSONObject? =
         RishAgentCoreNative.preparedAttempt(
@@ -110,17 +113,30 @@ internal class AndroidPreparedAttemptStore(
             return conflict(request, "E_AGENT_CONFLICT", seen)
         }
 
-        // Resolving a root needs a workspace and a project subsystem, neither
-        // of which exists here. A request that names one is answered the way
-        // iOS answers a root it can no longer prove.
+        // A root request is answered from the workspace registry. One that
+        // names a project, or a binding this device cannot prove, is answered
+        // the way iOS answers a root it can no longer prove.
         val rooted = !request.isNull("workspace_id") || !request.isNull("project_id") ||
             !request.isNull("workspace_binding_revision")
-        if (rooted) return conflict(request, "E_AGENT_ROOT_STALE", seen)
+        val root = if (!rooted) null else roots?.resolve(
+            request.optString("workspace_id").takeUnless { request.isNull("workspace_id") },
+            request.optString("project_id").takeUnless { request.isNull("project_id") },
+            if (request.isNull("workspace_binding_revision")) null
+            else request.optInt("workspace_binding_revision", -1),
+        ) ?: return conflict(request, "E_AGENT_ROOT_STALE", seen)
 
-        val registry = JSONObject()
-            .put("schema_version", 2).put("registry_version", 2)
-            .put("toolset_sha256", AndroidAgentToolRegistry.toolsetSha256())
-            .put("tools", JSONArray())
+        // The registry and the policy are the root's, and both come from the
+        // core. A rootless attempt is rejected before either is consulted, so
+        // it carries the empty registry the core expects for one.
+        val registry = if (root != null) {
+            AndroidAgentToolRegistry.registryForRoot(root)
+        } else {
+            JSONObject()
+                .put("schema_version", 2).put("registry_version", 2)
+                .put("toolset_sha256", AndroidAgentToolRegistry.toolsetSha256())
+                .put("tools", JSONArray())
+        }
+        val policy = if (root != null) AndroidAgentToolRegistry.policyForRoot(root) else null
         val requestSha = RishAgentCoreNative.hash("agent-operation-request", JSONObject()
             .put("operation_kind", "prepare_agent_attempt").put("request", request))
 
@@ -138,8 +154,8 @@ internal class AndroidPreparedAttemptStore(
             val outcome = reduce("transaction", JSONObject()
                 .put("request", request)
                 .put("request_sha256", requestSha)
-                .put("root", JSONObject.NULL)
-                .put("policy", JSONObject.NULL)
+                .put("root", value(root))
+                .put("policy", value(policy))
                 .put("registry", registry)
                 .put("toolset_sha256", registry.getString("toolset_sha256"))
                 .put("operations", state.getJSONArray("operations"))

@@ -6,11 +6,17 @@
 use rish_agent_core::agent_policy::reduce_json as agent_policy_reduce_json;
 use rish_agent_core::canonical::{canonical_json, hash_bytes, hash_json};
 use rish_agent_core::completion_response::reduce_json as completion_response_reduce_json;
+use rish_agent_core::container_anchor::reduce_json as container_anchor_reduce_json;
 use rish_agent_core::git_tool::reduce_json as git_tool_reduce_json;
 use rish_agent_core::ledger_batch::reduce_json as ledger_batch_reduce_json;
 use rish_agent_core::ledger_ops::reduce_json as ledger_reduce_json;
 use rish_agent_core::prepared_attempt::reduce_json as prepared_attempt_reduce_json;
+use rish_agent_core::project_access::reduce_json as project_access_reduce_json;
+use rish_agent_core::project_context_bridge::reduce_json as project_context_bridge_reduce_json;
 use rish_agent_core::project_context_policy::reduce_json as project_context_reduce_json;
+use rish_agent_core::project_context_service::reduce_json as project_context_service_reduce_json;
+use rish_agent_core::project_context_store::reduce_json as project_context_store_reduce_json;
+use rish_agent_core::project_module::reduce_json as project_module_reduce_json;
 use rish_agent_core::provider_round::reduce_json as provider_round_reduce_json;
 use rish_agent_core::root_projection::reduce_json as root_reduce_json;
 use rish_agent_core::round_journal::reduce_json;
@@ -24,6 +30,17 @@ use rish_agent_core::transcript_store::reduce_json as transcript_reduce_json;
 use rish_agent_core::wal_operations::reduce_json as wal_operation_reduce_json;
 use rish_agent_core::wal_resident::{Confirmation, Resident};
 use rish_agent_core::wal_state::reduce_json as wal_state_reduce_json;
+use rish_agent_core::workspace_authority::reduce_json as workspace_authority_reduce_json;
+use rish_agent_core::workspace_clearance::reduce_json as workspace_clearance_reduce_json;
+use rish_agent_core::workspace_directory_name::reduce_json as workspace_directory_name_reduce_json;
+use rish_agent_core::workspace_error::reduce_json as workspace_error_reduce_json;
+use rish_agent_core::workspace_fingerprint::reduce_json as workspace_fingerprint_reduce_json;
+use rish_agent_core::workspace_grants::reduce_json as workspace_grants_reduce_json;
+use rish_agent_core::workspace_journal::reduce_json as workspace_journal_reduce_json;
+use rish_agent_core::workspace_json::bounded_exact_structure;
+use rish_agent_core::workspace_read_tools::reduce_json as workspace_read_tools_reduce_json;
+use rish_agent_core::workspace_receipt::reduce_json as workspace_receipt_reduce_json;
+use rish_agent_core::workspace_record::reduce_json as workspace_record_reduce_json;
 use rish_agent_core::workspace_tool::reduce_json as workspace_tool_reduce_json;
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -314,8 +331,10 @@ pub unsafe extern "C" fn rish_agent_policy_reduce(
 
 /// Runs one chat-read-v1 project-context policy decision over the JSON
 /// envelope documented on
-/// `rish_agent_core::project_context_policy::reduce_json`. Case folding stays
-/// with the host; which folded names are sensitive is decided here.
+/// `rish_agent_core::project_context_policy::reduce_json`; `content` carries a
+/// file's raw bytes for the `content_decision` op and may be null for the
+/// others. Case folding stays with the host; which folded names are sensitive
+/// is decided here.
 ///
 /// # Safety
 /// `pointer` must reference `length` readable bytes or be null.
@@ -323,11 +342,18 @@ pub unsafe extern "C" fn rish_agent_policy_reduce(
 pub unsafe extern "C" fn rish_agent_project_context_reduce(
     pointer: *const c_char,
     length: usize,
+    content: *const u8,
+    content_length: usize,
 ) -> *mut c_char {
     let Some(text) = input(pointer, length) else {
         return std::ptr::null_mut();
     };
-    output(project_context_reduce_json(text))
+    let bytes = if content.is_null() || content_length == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(content, content_length)
+    };
+    output(project_context_reduce_json(text, bytes))
 }
 
 /// Parses one provider completion response over the JSON envelope documented
@@ -362,6 +388,315 @@ pub unsafe extern "C" fn rish_agent_git_tool_reduce(
         return std::ptr::null_mut();
     };
     output(git_tool_reduce_json(text))
+}
+
+/// Runs one project-module decision over the JSON envelope documented on
+/// `rish_agent_core::project_module::reduce_json` — what a project operation's
+/// arguments have to be, and which stable code a failure is reported to
+/// JavaScript as.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_project_module_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(project_module_reduce_json(text))
+}
+
+/// Runs one project-context-bridge decision over the JSON envelope documented
+/// on `rish_agent_core::project_context_bridge::reduce_json` — what a
+/// project-context result may say at the boundary to JavaScript.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_project_context_bridge_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(project_context_bridge_reduce_json(text))
+}
+
+/// Runs one project-context-service decision over the JSON envelope documented
+/// on `rish_agent_core::project_context_service::reduce_json` — how a snapshot
+/// reference is named, and what a caller's v2 arguments have to be.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_project_context_service_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(project_context_service_reduce_json(text))
+}
+
+/// Runs one project-context-store decision over the JSON envelope documented
+/// on `rish_agent_core::project_context_store::reduce_json` — how the store
+/// names what it keeps, and what an interrupted prepare transaction resolves
+/// to on the next launch.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_project_context_store_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(project_context_store_reduce_json(text))
+}
+
+/// Runs one container-anchor decision over the JSON envelope documented on
+/// `rish_agent_core::container_anchor::reduce_json` — where a path stops being
+/// the app's own container and starts being a place inside it. Splitting a
+/// path into components stays with the host, because `pathComponents` is
+/// Foundation's and keeps a leading "/" a naive split would not.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_container_anchor_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(container_anchor_reduce_json(text))
+}
+
+/// Runs one project-access decision over the JSON envelope documented on
+/// `rish_agent_core::project_access::reduce_json` — what a project binding,
+/// its root reference and its stored metadata look like. The git directory
+/// crosses as a path and a flag rather than an `NSURL`, and Foundation's
+/// trimming crosses as the trimmed spelling.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_project_access_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(project_access_reduce_json(text))
+}
+
+/// Runs one workspace-clearance decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_clearance::reduce_json` — what a destructive
+/// operation and its consent receipt look like, and whether a receipt
+/// authorises the operation in front of it.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_clearance_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_clearance_reduce_json(text))
+}
+
+/// Runs one workspace-error decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_error::reduce_json` — which public code and
+/// message a workspace failure is reported as. The mapping is contract: a
+/// caller branches on the code, so both platforms have to answer alike.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_error_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_error_reduce_json(text))
+}
+
+/// Whether stored workspace bytes are JSON this engine will look at:
+/// `rish_agent_core::workspace_json::bounded_exact_structure`. Unlike the
+/// other reducers this takes the raw bytes rather than an envelope, because
+/// the whole question is about bytes that may not be JSON at all. Returns 1
+/// for acceptable, 0 otherwise.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_json_bounded(
+    pointer: *const c_char,
+    length: usize,
+) -> u8 {
+    if pointer.is_null() {
+        return 0;
+    }
+    let bytes = std::slice::from_raw_parts(pointer as *const u8, length);
+    u8::from(bounded_exact_structure(bytes))
+}
+
+/// Runs one workspace-journal decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_journal::reduce_json` — what an operation
+/// journal looks like mid-flight, and how its recorded identity relates to
+/// what is on disk. Statting stays with the host, which passes the four
+/// identifiers it read as the canonical strings the journal holds.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_journal_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_journal_reduce_json(text))
+}
+
+/// Runs one workspace read-tool decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_read_tools::reduce_json` — which readers a
+/// workspace exposes and what their options may be. The list is closed, and an
+/// option key the rule does not recognise is refused rather than ignored.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_read_tools_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_read_tools_reduce_json(text))
+}
+
+/// Runs one workspace-receipt decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_receipt::reduce_json` — what a stored operation
+/// receipt looks like, what a caller is shown of one, and whether one has
+/// outlived its retry window. Parsing the timestamp stays with the host: it
+/// passes the age it measured.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_receipt_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_receipt_reduce_json(text))
+}
+
+/// Runs one workspace-record decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_record::reduce_json` — what a stored registry
+/// record looks like. Case-and-diacritic folding stays with the host.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_record_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_record_reduce_json(text))
+}
+
+/// Runs one workspace-authority decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_authority::reduce_json` — what a stored
+/// authority looks like and how it is tied to its record. Base64 decoding
+/// stays with the host; the decoded bookmark's length and digest come in as
+/// facts.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_authority_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_authority_reduce_json(text))
+}
+
+/// Runs one workspace directory-name decision over the JSON envelope
+/// documented on `rish_agent_core::workspace_directory_name::reduce_json` —
+/// what a registry-owned path component may be, and what an occupied display
+/// name is called at each ordinal. Folding and grapheme segmentation stay with
+/// the host; where the cut falls does not.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_directory_name_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_directory_name_reduce_json(text))
+}
+
+/// Runs one workspace-grant decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_grants::reduce_json` — what a stored record is
+/// allowed to do, and how that is shown.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_grants_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_grants_reduce_json(text))
+}
+
+/// Runs one workspace root-fingerprint decision over the JSON envelope
+/// documented on `rish_agent_core::workspace_fingerprint::reduce_json` — what
+/// binds a workspace authority to a physical directory.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_fingerprint_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_fingerprint_reduce_json(text))
 }
 
 /// Runs one workspace-tool decision over the JSON envelope documented on

@@ -259,6 +259,85 @@ Java_tech_zseven_rish_runtime_RishAgentCoreNative_toolRegistryReduceNative(
   return TakeOwnedReply(env, rish_agent_tool_registry_reduce(utf8.data(), utf8.size()));
 }
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceRecordReduceNative(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_record_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceFingerprintReduceNative(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_fingerprint_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceGrantsReduceNative(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_grants_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceAuthorityReduceNative(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_authority_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceDirectoryNameReduceNative(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_directory_name_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_rootReduceNative(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_root_reduce(utf8.data(), utf8.size()));
+}
+
+// The stored-JSON scan takes raw bytes rather than an envelope, because the
+// question is about bytes that may not be JSON at all.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceJsonBoundedNative(
+    JNIEnv *env, jclass, jbyteArray bytes) {
+  if (bytes == nullptr) return JNI_FALSE;
+  jsize length = env->GetArrayLength(bytes);
+  jbyte *elements = env->GetByteArrayElements(bytes, nullptr);
+  if (elements == nullptr) return JNI_FALSE;
+  unsigned char accepted = rish_agent_workspace_json_bounded(
+      reinterpret_cast<const char *>(elements), static_cast<size_t>(length));
+  env->ReleaseByteArrayElements(bytes, elements, JNI_ABORT);
+  return accepted == 1 ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceReceiptReduceNative(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_receipt_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceJournalReduceNative(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_journal_reduce(utf8.data(), utf8.size()));
+}
+
 // The resident committed state. The handle crosses as an opaque jlong; the
 // caller owns it until walClose, exactly as on the C side.
 extern "C" JNIEXPORT jlong JNICALL

@@ -11,8 +11,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import tech.zseven.rish.runtime.AndroidAgentWal
+import tech.zseven.rish.runtime.AndroidAgentRootResolver
 import tech.zseven.rish.runtime.AndroidPreparedAttemptStore
+import tech.zseven.rish.runtime.AndroidRuntimeState
 import tech.zseven.rish.runtime.AndroidSessionStore
+import tech.zseven.rish.runtime.AndroidWorkspaceRegistry
 import tech.zseven.rish.runtime.RishAgentCoreNative
 import java.io.File
 import java.util.UUID
@@ -25,13 +28,19 @@ import java.util.UUID
  * operation bound to N" is the one place in the engine where a crash can leave
  * them disagreeing, and until now nothing exercised it on either platform.
  *
- * **What these cover, exactly.** Android can resolve no root, so every attempt
- * here is rootless, and the core commits a rootless attempt as `not_agent` /
+ * **What these cover, exactly.** The rootless tests cover the seam on the
+ * **rejection** path: the core commits a rootless attempt as `not_agent` /
  * `E_AGENT_NO_ROOT` with the operation in state `rejected` — no authority, no
- * transcript. So this is the cross-store seam on the **rejection** path: the
- * session read, the checkpoint relation, the durable WAL write, replay, and
- * recovery after an interrupted write. It says nothing about successful
- * authority creation, which still needs the rooted iOS coverage.
+ * transcript — and they exercise the session read, the checkpoint relation,
+ * the durable WAL write, replay, and recovery after an interrupted write.
+ *
+ * The rooted tests cover the same seam on the path that **writes**: a session
+ * bound to a workspace this device holds resolves to a root, and the core
+ * commits an authority and a transcript against it. A binding that cannot be
+ * proven is stale, and nothing is written.
+ *
+ * Still uncovered here: rebinding, and project roots. Neither exists on this
+ * platform.
  */
 @RunWith(AndroidJUnit4::class)
 class AndroidPreparedAttemptStoreTest {
@@ -45,7 +54,7 @@ class AndroidPreparedAttemptStoreTest {
      * names. An empty session would be refused as a mismatch long before the
      * cross-store seam, which is the thing under test.
      */
-    private fun session(ids: Ids, epoch: Int = 0): JSONObject {
+    private fun session(ids: Ids, epoch: Int = 0, workspace: String? = null): JSONObject {
         val message = JSONObject().put("id", ids.message).put("role", "user")
             .put("text", "hello").put("created_at", STAMP)
             .put("attachments", JSONArray())
@@ -66,11 +75,12 @@ class AndroidPreparedAttemptStoreTest {
             .put("assistant_message_id", JSONObject.NULL)
             .put("failure_code", JSONObject.NULL)
             .put("created_at", STAMP).put("updated_at", STAMP)
-            .put("workspace_id", JSONObject.NULL)
-            .put("workspace_binding_revision", JSONObject.NULL)
+            .put("workspace_id", workspace ?: JSONObject.NULL)
+            .put("workspace_binding_revision", if (workspace == null) JSONObject.NULL else 1)
             .put("journal_revision", 0).put("agent", JSONObject.NULL)
         val conversation = JSONObject().put("id", ids.conversation)
-            .put("project_id", JSONObject.NULL).put("workspace_id", JSONObject.NULL)
+            .put("project_id", JSONObject.NULL)
+            .put("workspace_id", workspace ?: JSONObject.NULL)
             .put("runtime_context_id", JSONObject.NULL)
             .put("project_context", JSONObject.NULL)
             .put("title", "t").put("title_source", "auto")
@@ -84,7 +94,13 @@ class AndroidPreparedAttemptStoreTest {
                 .put("created_at", STAMP)))
             .put("attempts", JSONArray().put(attempt))
             .put("created_at", STAMP).put("updated_at", STAMP)
-            .put("workspace_binding", JSONObject.NULL)
+            .put(
+                "workspace_binding",
+                if (workspace == null) JSONObject.NULL
+                else JSONObject().put("schema_version", 1)
+                    .put("workspace_id", workspace).put("binding_revision", 1)
+                    .put("project_id", JSONObject.NULL),
+            )
             .put("workspace_bootstrap_state", "none")
             .put("agent_grants", JSONArray())
         return JSONObject().put("schema_version", 9)
@@ -111,8 +127,9 @@ class AndroidPreparedAttemptStoreTest {
      * canonical form, which is also what the real controller writes.
      */
     private fun commitSession(store: AndroidSessionStore, ids: Ids, epoch: Int = 0,
-                              expected: JSONObject? = null): JSONObject {
-        val candidate = RishAgentCoreNative.canonical(session(ids, epoch).toString())
+                              expected: JSONObject? = null,
+                              workspace: String? = null): JSONObject {
+        val candidate = RishAgentCoreNative.canonical(session(ids, epoch, workspace).toString())
             ?: error("the session fixture is not canonicalisable")
         val reply = store.persist(JSONObject().put("schema_version", 1)
             .put("operation_id", UUID.randomUUID().toString())
@@ -123,7 +140,7 @@ class AndroidPreparedAttemptStoreTest {
         return reply.getJSONObject("snapshot")
     }
 
-    private fun request(snapshot: JSONObject, ids: Ids): JSONObject {
+    private fun request(snapshot: JSONObject, ids: Ids, workspace: String? = null): JSONObject {
         val cas = JSONObject().put("schema_version", 1)
             .put("conversation_id", ids.conversation).put("task_id", ids.task)
             .put("attempt_id", ids.attempt)
@@ -140,8 +157,9 @@ class AndroidPreparedAttemptStoreTest {
             .put("controller_cas", cas).put("committed_checkpoint", checkpoint)
             .put("task_id", ids.task).put("conversation_id", ids.conversation)
             .put("attempt_id", ids.attempt)
-            .put("workspace_id", JSONObject.NULL).put("project_id", JSONObject.NULL)
-            .put("workspace_binding_revision", JSONObject.NULL)
+            .put("workspace_id", workspace ?: JSONObject.NULL)
+            .put("project_id", JSONObject.NULL)
+            .put("workspace_binding_revision", if (workspace == null) JSONObject.NULL else 1)
             .put("transport_schema_version", 2)
             .put("model", MODEL).put("thinking_mode", THINKING)
             .put("visible_message_ids", JSONArray().put(ids.message))
@@ -160,6 +178,34 @@ class AndroidPreparedAttemptStoreTest {
         val attempt: String = UUID.randomUUID().toString(),
         val message: String = UUID.randomUUID().toString(),
     )
+
+    /**
+     * The same fixture with a real workspace registry behind it, so a rooted
+     * request resolves against a root that actually exists on this device.
+     */
+    private fun <T> rootedFixture(
+        body: (AndroidSessionStore, AndroidAgentWal, AndroidPreparedAttemptStore, AndroidWorkspaceRegistry) -> T,
+    ): T {
+        assertTrue("the agent core is not staged", RishAgentCoreNative.available)
+        val name = "prepared-session-${UUID.randomUUID()}.db"
+        val root = walRoot()
+        val workspaceRoot = File(context.noBackupFilesDir, "prepared-ws-${UUID.randomUUID()}")
+            .apply { mkdirs() }
+        val sessions = AndroidSessionStore(context, name)
+        try {
+            val wal = AndroidAgentWal(root)
+            val workspaces = AndroidWorkspaceRegistry(workspaceRoot)
+            val store = AndroidPreparedAttemptStore(
+                sessions, wal, AndroidAgentRootResolver(workspaces),
+            )
+            return body(sessions, wal, store, workspaces)
+        } finally {
+            sessions.close()
+            context.deleteDatabase(name)
+            root.deleteRecursively()
+            workspaceRoot.deleteRecursively()
+        }
+    }
 
     private fun <T> fixture(body: (AndroidSessionStore, AndroidAgentWal, AndroidPreparedAttemptStore) -> T): T {
         assertTrue("the agent core is not staged", RishAgentCoreNative.available)
@@ -268,17 +314,15 @@ class AndroidPreparedAttemptStoreTest {
     }
 
     /**
-     * A request naming a workspace is refused, but as a **conflict**, not as a
-     * stale root — and the order is the point. `session_matches` runs before
-     * the root is consulted, and a stored attempt on Android can never carry a
-     * workspace, because `AndroidSessionStore` refuses to persist a session
-     * whose conversations are workspace-bound. So the request and the stored
-     * attempt disagree first.
+     * A request naming a workspace the *session* does not name is refused as a
+     * **conflict**, not as a stale root — and the order is the point.
+     * `session_matches` runs before the root is consulted, so a request that
+     * disagrees with the stored attempt is answered on that disagreement, even
+     * when the workspace it names is one this device could resolve.
      *
-     * The store's own root-stale branch is therefore unreachable on this
-     * platform today. It is kept because it states the limit honestly and will
-     * matter the day the session store accepts workspace-bound sessions — but
-     * nothing here exercises it, and it should not be counted as covered.
+     * The root-stale branch is exercised by the rooted tests below, where the
+     * session and the request agree and it is the *root* that cannot be
+     * proven.
      */
     @Test fun anAttemptNamingAWorkspaceIsRefusedAndWritesNothing() = fixture { sessions, wal, store ->
         val ids = Ids()
@@ -291,6 +335,33 @@ class AndroidPreparedAttemptStoreTest {
         assertEquals("conflict", result.optString("status"))
         assertEquals("E_AGENT_CONFLICT", result.optString("failure_code"))
         assertEquals(before, wal.snapshot().getLong("generation"))
+    }
+
+    /**
+     * The bridge module serves the operation rather than rejecting it, and the
+     * answer that reaches JS is the core's own: `not_agent` / `E_AGENT_NO_ROOT`
+     * for a rootless attempt. `implemented` stays false, because one served
+     * operation is not the whole agent surface and the JS layer reads that
+     * constant as "all of it is here".
+     */
+    @Test fun theBridgeServesAPreparedAttemptOnTheRealRuntimeState() {
+        assertTrue(RishAgentCoreNative.available)
+        val runtime = AndroidRuntimeState.get(context)
+        val ids = Ids()
+        // The shared session store is whatever this device already has, so the
+        // checkpoint is taken from a session committed through it.
+        val snapshot = commitSession(runtime.sessions, ids)
+        val before = runtime.agentWal.snapshot().getLong("generation")
+        val result = runtime.preparedAttempts.prepareAgentAttempt(request(snapshot, ids))
+        assertEquals("not_agent", result.optString("status"))
+        assertEquals("E_AGENT_NO_ROOT", result.optString("failure_code"))
+        // It is a durable commit, not an in-memory answer.
+        assertNotEquals(before, runtime.agentWal.snapshot().getLong("generation"))
+        val operations = runtime.agentWal.snapshot().getJSONArray("operations")
+        assertEquals(
+            "rejected",
+            operations.getJSONObject(operations.length() - 1).getString("state"),
+        )
     }
 
     @Test fun anAttemptHasNoAuthorityToFind() = fixture { sessions, _, store ->
@@ -311,4 +382,93 @@ class AndroidPreparedAttemptStoreTest {
         const val THINKING = "off"
         const val STAMP = "2026-09-16T00:00:00.000Z"
     }
+
+    /**
+     * The first prepared attempt on Android that is *not* a rejection. A
+     * session bound to a workspace this device actually holds resolves to a
+     * root, and the core commits an authority and a transcript against it.
+     *
+     * Everything before this exercised the cross-store seam on the rejection
+     * path only. This is the same seam on the path that writes.
+     */
+    @Test fun aRootedAttemptResolvesItsWorkspaceAndPreparesForReal() = rootedFixture { sessions, wal, store, workspaces ->
+        val workspace = workspaces.create("Scratch").getString("workspace_id")
+        val ids = Ids()
+        val snapshot = commitSession(sessions, ids, workspace = workspace)
+        val before = wal.snapshot().getLong("generation")
+        val result = store.prepareAgentAttempt(request(snapshot, ids, workspace))
+        assertEquals("prepared", result.optString("status"))
+        assertTrue(result.isNull("failure_code"))
+        // The authority names the root that was resolved, not one invented
+        // here: its fingerprint is the registry's.
+        val state = wal.snapshot()
+        assertTrue(state.getLong("generation") > before)
+        val authorities = state.getJSONArray("authorities")
+        assertEquals(1, authorities.length())
+        val authority = authorities.getJSONObject(0)
+        assertEquals("prepared", authority.getString("state"))
+        val root = authority.getJSONObject("root")
+        assertEquals(workspace, root.getString("workspace_id"))
+        assertEquals(1, root.getInt("workspace_binding_revision"))
+        assertEquals(
+            workspaces.fingerprintFor(workspace),
+            root.getString("root_fingerprint_sha256"),
+        )
+        assertEquals(1, state.getJSONArray("transcripts").length())
+    }
+
+    /**
+     * The same request against a root that can no longer be proven is stale,
+     * and nothing is written. A binding the device cannot back is never
+     * quietly downgraded to a rootless attempt: that would run the turn
+     * somewhere the person did not ask for.
+     */
+    @Test fun aRootedAttemptWhoseRootCannotBeProvenIsStale() = rootedFixture { sessions, wal, store, workspaces ->
+        val workspace = workspaces.create("Scratch").getString("workspace_id")
+        val ids = Ids()
+        val snapshot = commitSession(sessions, ids, workspace = workspace)
+        // Break the authority so the root stops proving out.
+        val file = File(File(workspaces.root, "bindings"), "owned-$workspace-r1.json")
+        val authority = JSONObject(file.readText())
+        authority.put("inode_id", (authority.getString("inode_id").toLong() + 1).toString())
+        file.writeText(authority.toString())
+
+        val before = wal.snapshot().getLong("generation")
+        val result = store.prepareAgentAttempt(request(snapshot, ids, workspace))
+        assertEquals("conflict", result.optString("status"))
+        assertEquals("E_AGENT_ROOT_STALE", result.optString("failure_code"))
+        assertEquals(before, wal.snapshot().getLong("generation"))
+    }
+
+    /**
+     * A binding this device never held is stale too — the session may name
+     * whatever the person chose on another device, and the registry is what
+     * says whether it is here.
+     */
+    @Test fun aRootedAttemptNamingAnUnknownWorkspaceIsStale() = rootedFixture { sessions, wal, store, _ ->
+        val workspace = UUID.randomUUID().toString()
+        val ids = Ids()
+        val snapshot = commitSession(sessions, ids, workspace = workspace)
+        val before = wal.snapshot().getLong("generation")
+        val result = store.prepareAgentAttempt(request(snapshot, ids, workspace))
+        assertEquals("conflict", result.optString("status"))
+        assertEquals("E_AGENT_ROOT_STALE", result.optString("failure_code"))
+        assertEquals(before, wal.snapshot().getLong("generation"))
+    }
+
+    /**
+     * A store with no resolver behind it can prove no root at all, so every
+     * rooted request is stale. That is the build this platform shipped until
+     * the registry existed, and it stays correct rather than crashing.
+     */
+    @Test fun aStoreWithNoResolverTreatsEveryRootAsStale() = rootedFixture { sessions, wal, _, workspaces ->
+        val workspace = workspaces.create("Scratch").getString("workspace_id")
+        val ids = Ids()
+        val snapshot = commitSession(sessions, ids, workspace = workspace)
+        val rootless = AndroidPreparedAttemptStore(sessions, wal)
+        val result = rootless.prepareAgentAttempt(request(snapshot, ids, workspace))
+        assertEquals("conflict", result.optString("status"))
+        assertEquals("E_AGENT_ROOT_STALE", result.optString("failure_code"))
+    }
+
 }

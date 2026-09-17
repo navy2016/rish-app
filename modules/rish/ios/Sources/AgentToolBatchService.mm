@@ -10,6 +10,7 @@
 #import "DSHAgentRuntimeToolExecutor.h"
 
 #include "rish_agent_core.h"
+#include <os/log.h>
 
 // Every decision of this service lives in the shared core
 // (modules/rish/core, `rish_agent_tool_batch_reduce`): request shapes, the
@@ -419,8 +420,15 @@ static NSDictionary *DSHAgentBatchConversation(NSDictionary *session,
   NSDictionary *prepared = [self.ledger prepareAgentToolBatchWithRequest:final[@"internal"]
                                                                     error:error];
   if (prepared == nil) {
-    NSInteger nativeCode = (error != nullptr && *error != nil)
-        ? (*error).code : DSHAgentNativeStoreErrorUnavailable;
+    // The committed rejection keeps only a failure code, and several store
+    // reasons share one. Record the reason here or it is unrecoverable from a
+    // device that has already failed. `reported` separates a store that said
+    // Unavailable from one that said nothing and was assumed to mean it.
+    BOOL reported = error != nullptr && *error != nil;
+    NSInteger nativeCode = reported ? (*error).code : DSHAgentNativeStoreErrorUnavailable;
+    os_log(OS_LOG_DEFAULT,
+           "agent_batch_ledger_refused store_code=%{public}ld reported=%{public}d",
+           (long)nativeCode, reported ? 1 : 0);
     NSDictionary *failure = DSHAgentBatchReduce(@"prepare_ledger_failure", @{
       @"request" : request, @"native_code" : @(nativeCode),
       @"prepared_calls" : preparedCalls,

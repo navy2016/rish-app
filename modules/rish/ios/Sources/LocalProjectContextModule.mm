@@ -7,6 +7,8 @@
 
 #include <math.h>
 
+#include "rish_agent_core.h"
+
 static NSString *const DSHPCRequestInvalid = @"E_CONTEXT_REQUEST_INVALID";
 static NSString *const DSHPCResultInvalid = @"E_CONTEXT_RESULT_INVALID";
 static NSString *const DSHPCBusy = @"E_CONTEXT_BUSY";
@@ -116,23 +118,29 @@ static BOOL DSHPCTimestamp(id value) {
   return [formatter dateFromString:string] != nil;
 }
 
+// What a project-context result may say lives in the shared core
+// (modules/rish/core, `rish_agent_project_context_bridge_reduce`).
+static NSDictionary *DSHPCReduce(NSString *op, NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_project_context_bridge_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
 static NSString *DSHPCSafeRelativePath(id value) {
-  NSString *path = DSHPCBoundedString(value, 4096, NO);
-  if (path == nil || [path hasPrefix:@"/"] || [path containsString:@"\\"] ||
-      [path rangeOfString:@"\0"].location != NSNotFound) {
-    return nil;
-  }
-  NSArray<NSString *> *components = [path componentsSeparatedByString:@"/"];
-  if (components.count == 0) return nil;
-  NSCharacterSet *controls = [NSCharacterSet controlCharacterSet];
-  if ([path rangeOfCharacterFromSet:controls].location != NSNotFound) return nil;
-  for (NSString *component in components) {
-    if (component.length == 0 || [component isEqualToString:@"."] ||
-        [component isEqualToString:@".."]) {
-      return nil;
-    }
-  }
-  return [path copy];
+  BOOL valid = [DSHPCReduce(@"safe_relative_path", @{
+    @"value" : value ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
+  return valid ? [DSHPCString(value) copy] : nil;
 }
 
 static NSString *DSHPCGitBranch(id value) {

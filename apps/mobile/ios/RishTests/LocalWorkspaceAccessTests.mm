@@ -2190,6 +2190,178 @@ static NSString *const DSHDigestB =
                         @"sCrAtCh (2)");
 }
 
+// A display name at the 120-byte bound has to give up bytes to make room for
+// its ordinal suffix, and the cut falls on a composed character sequence.
+// Foundation used to do that cutting inline; the core does it now, over
+// clusters the host supplies, so this pins that the two agree. If the cut ever
+// fell on a byte or a scalar boundary, the name would end in half a flag.
+- (void)testOccupiedDisplayNameAtTheBoundIsTruncatedOnAClusterBoundary {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  NSURL *container = [self ownedWorkspacesRootForRoot:self.rootURL];
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:container
+                                       withIntermediateDirectories:YES
+                                                        attributes:nil
+                                                             error:nil]);
+  NSString *flag = @"\U0001F1EF\U0001F1F5";
+  XCTAssertEqual([flag lengthOfBytesUsingEncoding:NSUTF8StringEncoding], 8u);
+  NSMutableString *name = [NSMutableString string];
+  for (NSUInteger index = 0; index < 15; index += 1) [name appendString:flag];
+  XCTAssertEqual([name lengthOfBytesUsingEncoding:NSUTF8StringEncoding], 120u);
+
+  NSURL *preexisting = [container URLByAppendingPathComponent:name
+                                                  isDirectory:YES];
+  XCTAssertEqual(mkdir(preexisting.fileSystemRepresentation, 0700), 0);
+
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  NSError *error = nil;
+  NSDictionary *created =
+      [access createRishOwnedWorkspaceWithDisplayName:name
+                                          operationId:DSHOperationA
+                                                error:&error];
+  XCTAssertNotNil(created, @"%@", error);
+
+  NSMutableString *expected = [NSMutableString string];
+  for (NSUInteger index = 0; index < 14; index += 1) [expected appendString:flag];
+  [expected appendString:@" (1)"];
+  XCTAssertEqual([expected lengthOfBytesUsingEncoding:NSUTF8StringEncoding], 116u);
+  NSString *allocated = [self recordForRoot:self.rootURL
+                                workspaceId:DSHWorkspaceA][@"owned_directory_name"];
+  XCTAssertEqualObjects(allocated, expected);
+  // Nothing partial survived the cut: every flag in the name is whole.
+  NSUInteger whole = [[allocated componentsSeparatedByString:flag] count] - 1;
+  XCTAssertEqual(whole, 14u);
+}
+
+// An authority written before root fingerprints existed carries every field
+// its shape names except that one. Opening it upgrades it in place: the same
+// contents, sealed with the fingerprint they imply. Nothing else in the suite
+// exercised that path, so this is the only thing standing between the
+// migration rules and a green board that means nothing.
+- (void)testAnAuthorityWrittenBeforeFingerprintsIsUpgradedInPlace {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  NSError *error = nil;
+  XCTAssertNotNil([access createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                                      operationId:DSHOperationA
+                                                            error:&error],
+                  @"%@", error);
+  NSURL *authorityURL = [self authorityURLForRoot:self.rootURL kind:@"owned"
+                                      workspaceId:DSHWorkspaceA revision:1];
+  NSDictionary *sealed = [NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:authorityURL]
+                 options:0 error:nil];
+  NSString *fingerprint = sealed[@"root_fingerprint_sha256"];
+  XCTAssertEqual(fingerprint.length, 64u);
+
+  // Roll it back to the pre-fingerprint shape.
+  NSMutableDictionary *old = [sealed mutableCopy];
+  [old removeObjectForKey:@"root_fingerprint_sha256"];
+  [self secureWriteObject:old toURL:authorityURL];
+
+  NSArray *metadata = [access listWorkspaceMetadataWithError:&error];
+  XCTAssertNotNil(metadata, @"%@", error);
+  XCTAssertEqual(metadata.count, 1u);
+  XCTAssertEqualObjects(metadata.firstObject[@"status"], @"ok");
+
+  // Upgraded in place, and to exactly the fingerprint it had before: the
+  // migration seals the contents it was given and invents nothing.
+  NSDictionary *upgraded = [NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:authorityURL]
+                 options:0 error:nil];
+  XCTAssertEqualObjects(upgraded, sealed);
+  XCTAssertEqualObjects(upgraded[@"root_fingerprint_sha256"], fingerprint);
+}
+
+// An authority missing a field its shape names is not a pre-fingerprint
+// authority, so there is nothing to upgrade — and the listing fails **closed**
+// with E_WORKSPACE_PERSISTENCE rather than reporting that one workspace as
+// unavailable. Storage that cannot be read as itself is not a workspace in a
+// bad state; it is storage that cannot be trusted to describe any of them.
+// (Measured, not assumed: the first draft of this test expected a per-record
+// non-ok status and was wrong.)
+- (void)testAnIncompleteAuthorityIsNotUpgraded {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  NSError *error = nil;
+  XCTAssertNotNil([access createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                                      operationId:DSHOperationA
+                                                            error:&error],
+                  @"%@", error);
+  NSURL *authorityURL = [self authorityURLForRoot:self.rootURL kind:@"owned"
+                                      workspaceId:DSHWorkspaceA revision:1];
+  NSMutableDictionary *broken = [[NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:authorityURL]
+                 options:0 error:nil] mutableCopy];
+  [broken removeObjectForKey:@"root_fingerprint_sha256"];
+  [broken removeObjectForKey:@"inode_id"];
+  [self secureWriteObject:broken toURL:authorityURL];
+
+  error = nil;
+  XCTAssertNil([access listWorkspaceMetadataWithError:&error]);
+  XCTAssertEqualObjects(error.domain, @"dev.zseven.rish.local-workspace-access");
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+  // Left exactly as it was found.
+  NSDictionary *after = [NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:authorityURL]
+                 options:0 error:nil];
+  XCTAssertEqualObjects(after, broken);
+}
+
+// One operation id names one outcome. A receipt store holding two of them
+// cannot say which retry is the one that happened, so the store is refused
+// whole rather than read past the duplicate. Nothing exercised that before.
+- (void)testAReceiptStoreWithARepeatedOperationIdIsRefused {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  NSError *error = nil;
+  XCTAssertNotNil([access createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                                      operationId:DSHOperationA
+                                                            error:&error],
+                  @"%@", error);
+  NSURL *receiptsURL = [self receiptsURLForRoot:self.rootURL];
+  NSMutableDictionary *envelope = [[NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:receiptsURL]
+                 options:0 error:nil] mutableCopy];
+  NSDictionary *receipt = ((NSArray *)envelope[@"receipts"]).firstObject;
+  XCTAssertNotNil(receipt);
+  // The same operation id twice, with the second disagreeing about the
+  // outcome — exactly the case a retry could not resolve.
+  NSMutableDictionary *twin = [receipt mutableCopy];
+  twin[@"operation"] = @"delete_owned";
+  twin[@"outcome"] = @"purge_pending";
+  envelope[@"receipts"] = @[receipt, twin];
+  [self secureWriteObject:envelope toURL:receiptsURL];
+
+  DSHLocalWorkspaceAccess *restarted = [self access];
+  error = nil;
+  XCTAssertNil([restarted queryOperationId:DSHOperationA error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+}
+
 - (void)testCreateRishOwnedWorkspaceRejectsInvalidDisplayNamesBeforeDocumentsMutation {
   NSURL *documents = [self documentsRootForRoot:self.rootURL];
   NSArray<NSString *> *invalidNames = @[
@@ -2293,6 +2465,64 @@ static NSString *const DSHDigestB =
   XCTAssertEqualObjects([restarted queryOperationId:DSHOperationA
                                                error:&error][@"status"],
                         @"not_started");
+}
+
+// The journal records the staging directory's device, inode, uid and gid, and
+// recovery checks them against what it stats before it touches anything. A
+// journal whose recorded identity is not the directory on disk describes some
+// other directory, so recovery refuses and preserves the evidence rather than
+// deleting a folder it cannot account for.
+//
+// Nothing exercised this before: making DSHJournalIdentityMatchesState return
+// YES unconditionally left all 68 tests green.
+- (void)testRecoveryRefusesAJournalWhoseIdentityIsNotTheDirectoryOnDisk {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:^BOOL(NSString *stage) {
+                       return [stage isEqual:@"create_after_staging_fsync"];
+                     }
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  NSError *error = nil;
+  XCTAssertNil([access createRishOwnedWorkspaceWithDisplayName:@"Crash"
+                                                   operationId:DSHOperationA
+                                                         error:&error]);
+  NSURL *journalURL = [self journalURLForRoot:self.rootURL];
+  NSMutableDictionary *journal = [[NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:journalURL]
+                 options:0 error:nil] mutableCopy];
+  XCTAssertEqualObjects(journal[@"phase"], @"prepared");
+  NSString *recordedInode = journal[@"staging_inode_id"];
+  XCTAssertTrue([recordedInode isKindOfClass:NSString.class]);
+  NSString *stagingName = journal[@"staging_name"];
+  NSURL *staging = [[self ownedWorkspacesRootForRoot:self.rootURL]
+      URLByAppendingPathComponent:stagingName isDirectory:YES];
+  XCTAssertTrue([NSFileManager.defaultManager
+      fileExistsAtPath:staging.path]);
+
+  // Same directory, a different inode recorded: this journal is about some
+  // other folder.
+  journal[@"staging_inode_id"] =
+      [@(recordedInode.longLongValue + 1) stringValue];
+  [self secureWriteObject:journal toURL:journalURL];
+
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  error = nil;
+  XCTAssertNil([restarted listWorkspaceMetadataWithError:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_CONFLICT");
+  // The evidence is left exactly where it was.
+  XCTAssertTrue([NSFileManager.defaultManager fileExistsAtPath:staging.path]);
+  XCTAssertTrue([NSFileManager.defaultManager
+      fileExistsAtPath:journalURL.path]);
 }
 
 - (void)testRishOwnedCreateRegistryFailureRecoversAuthorityReadyPublication {

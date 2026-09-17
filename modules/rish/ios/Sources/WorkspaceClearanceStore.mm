@@ -3,6 +3,8 @@
 
 #import "DSHWorkspaceCanonical.h"
 
+#include "rish_agent_core.h"
+
 #import <TargetConditionals.h>
 #import <objc/runtime.h>
 
@@ -243,21 +245,33 @@ static NSDate *DSHWorkspaceClearanceDateFromTimestamp(NSString *value) {
   return [formatter dateFromString:value];
 }
 
+// What a clearance operation and its receipt look like lives in the shared
+// core (modules/rish/core, `rish_agent_workspace_clearance_reduce`). The
+// store's bounds are the workspace receipt store's, and are now stated once
+// there rather than separately here.
+static NSDictionary *DSHWorkspaceClearanceReduce(NSString *op,
+                                                 NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_workspace_clearance_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
 static BOOL DSHWorkspaceClearanceCanonicalOperationFields(
     NSDictionary *operation) {
-  return DSHWorkspaceClearanceExactKeys(operation, @[
-           @"schema_version", @"operation_id", @"action", @"workspace_id",
-           @"binding_revision", @"clearance_receipt_id", @"created_at",
-         ]) &&
-      DSHWorkspaceClearanceSafeInteger(operation[@"schema_version"], YES) &&
-      [operation[@"schema_version"] unsignedIntegerValue] == 1 &&
-      DSHWorkspaceClearanceUUID(operation[@"operation_id"]) &&
-      ([operation[@"action"] isEqual:@"forget"] ||
-       [operation[@"action"] isEqual:@"delete_owned"]) &&
-      DSHWorkspaceClearanceUUID(operation[@"workspace_id"]) &&
-      DSHWorkspaceClearanceSafeInteger(operation[@"binding_revision"], NO) &&
-      DSHWorkspaceClearanceUUID(operation[@"clearance_receipt_id"]) &&
-      DSHWorkspaceClearanceTimestamp(operation[@"created_at"]);
+  return [DSHWorkspaceClearanceReduce(@"operation_shape", @{
+    @"operation" : [operation isKindOfClass:NSDictionary.class] ? operation
+                                                                : NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 BOOL DSHWorkspaceClearanceValidateOperation(NSDictionary *operation,
@@ -270,28 +284,18 @@ BOOL DSHWorkspaceClearanceValidateOperation(NSDictionary *operation,
 }
 
 static BOOL DSHWorkspaceClearanceReceiptFields(NSDictionary *receipt) {
-  return DSHWorkspaceClearanceExactKeys(receipt, @[
-           @"schema_version", @"clearance_receipt_id", @"operation_id",
-           @"workspace_id", @"binding_revision",
-           @"committed_session_generation", @"committed_session_sha256",
-           @"issued_at",
-         ]) &&
-      DSHWorkspaceClearanceSafeInteger(receipt[@"schema_version"], YES) &&
-      [receipt[@"schema_version"] unsignedIntegerValue] == 1 &&
-      DSHWorkspaceClearanceUUID(receipt[@"clearance_receipt_id"]) &&
-      DSHWorkspaceClearanceUUID(receipt[@"operation_id"]) &&
-      DSHWorkspaceClearanceUUID(receipt[@"workspace_id"]) &&
-      DSHWorkspaceClearanceSafeInteger(receipt[@"binding_revision"], NO) &&
-      DSHWorkspaceClearanceSafeInteger(
-          receipt[@"committed_session_generation"], NO) &&
-      DSHWorkspaceClearanceDigest(receipt[@"committed_session_sha256"]) &&
-      DSHWorkspaceClearanceTimestamp(receipt[@"issued_at"]);
+  return [DSHWorkspaceClearanceReduce(@"receipt_shape", @{
+    @"receipt" : [receipt isKindOfClass:NSDictionary.class] ? receipt
+                                                            : NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static BOOL DSHWorkspaceClearanceSessionReferenceValid(NSUInteger generation,
                                                        NSString *digest) {
-  return generation > 0 && generation < DSHWorkspaceClearanceMaximumSafeInteger &&
-      DSHWorkspaceClearanceDigest(digest);
+  return [DSHWorkspaceClearanceReduce(@"session_reference_valid", @{
+    @"generation" : @((unsigned long long)generation),
+    @"sha256" : digest ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static BOOL DSHWorkspaceClearanceWriteAll(int descriptor, NSData *data) {

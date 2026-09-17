@@ -2,6 +2,8 @@
 #import "LocalProjectAccessInternals.h"
 
 #import "DSHWorkspaceCanonical.h"
+
+#include "rish_agent_core.h"
 #import "LocalWorkspaceAccess.h"
 
 #import <CommonCrypto/CommonDigest.h>
@@ -117,84 +119,86 @@ static BOOL DSHLocalProjectCanonicalDigest(id value) {
   return [value rangeOfCharacterFromSet:hex.invertedSet].location == NSNotFound;
 }
 
+// What a project binding, its root reference and its stored metadata look
+// like lives in the shared core (modules/rish/core,
+// `rish_agent_project_access_reduce`). The git directory crosses as a path and
+// a flag rather than an NSURL, and Foundation's trimming crosses as the
+// trimmed spelling.
+static NSDictionary *DSHLocalProjectReduce(NSString *op, NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_project_access_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
+/// A binding as JSON: the git directory URL is not a JSON value, so it becomes
+/// its path alongside a flag saying whether it was a file URL at all.
+static NSDictionary *DSHLocalProjectBindingFields(NSDictionary *binding) {
+  if (![binding isKindOfClass:NSDictionary.class]) return nil;
+  NSMutableDictionary *fields = [binding mutableCopy];
+  id url = binding[@"git_directory_url"];
+  fields[@"git_directory_url"] =
+      [url isKindOfClass:NSURL.class] ? [url absoluteString] : NSNull.null;
+  return fields;
+}
+
 static BOOL DSHLocalProjectBindingIsValid(NSDictionary *binding,
                                           NSDictionary *rootRef,
                                           NSString *rootFingerprint) {
-  if (!DSHDictionaryHasExactKeys(binding, @[
-        @"schema_version", @"workspace_id", @"binding_revision", @"project_id",
-        @"display_name", @"git_topology", @"git_directory_url",
-        @"root_fingerprint_sha256"
-      ]) ||
-      ![binding[@"schema_version"] isKindOfClass:NSNumber.class] ||
-      DSHLocalProjectIsBoolean(binding[@"schema_version"]) ||
-      [binding[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
-      ![binding[@"schema_version"] isEqual:@2] ||
-      ![binding[@"workspace_id"] isEqual:rootRef[@"workspace_id"]] ||
-      ![binding[@"binding_revision"] isEqual:rootRef[@"binding_revision"]] ||
-      ![binding[@"project_id"] isEqual:rootRef[@"project_id"]] ||
-      !DSHLocalProjectCanonicalDigest(binding[@"root_fingerprint_sha256"]) ||
-      ![binding[@"root_fingerprint_sha256"] isEqual:rootFingerprint] ||
-      ![binding[@"git_topology"] isEqual:@"private_split_gitdir"]) {
-    return NO;
-  }
-  NSString *displayName = binding[@"display_name"];
-  if (![displayName isKindOfClass:NSString.class]) return NO;
-  NSData *displayBytes = [displayName dataUsingEncoding:NSUTF8StringEncoding
-                                      allowLossyConversion:NO];
-  if (displayBytes == nil ||
-      displayBytes.length == 0 || displayBytes.length > 120 ||
-      DSHHasControlCharacter(displayName) ||
-      [displayName containsString:@"/"] || [displayName containsString:@"\\"] ||
-      [displayName isEqual:@"."] || [displayName isEqual:@".."]) {
-    return NO;
-  }
-  NSURL *gitDirectoryURL = binding[@"git_directory_url"];
-  return [gitDirectoryURL isKindOfClass:NSURL.class] &&
-      gitDirectoryURL.isFileURL && [gitDirectoryURL.path hasPrefix:@"/"] &&
-      !DSHHasControlCharacter(gitDirectoryURL.path) &&
-      gitDirectoryURL.path.length <= PATH_MAX;
+  id url = [binding isKindOfClass:NSDictionary.class]
+      ? binding[@"git_directory_url"] : nil;
+  BOOL isFileURL = [url isKindOfClass:NSURL.class] && [url isFileURL];
+  NSString *path = [url isKindOfClass:NSURL.class] ? [url path] : nil;
+  return [DSHLocalProjectReduce(@"binding_valid", @{
+    @"binding" : DSHLocalProjectBindingFields(binding) ?: NSNull.null,
+    @"root_ref" : [rootRef isKindOfClass:NSDictionary.class] ? rootRef
+                                                             : NSNull.null,
+    @"root_fingerprint_sha256" : rootFingerprint ?: NSNull.null,
+    @"git_is_file_url" : isFileURL ? @YES : @NO,
+    @"git_directory_path" : path ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static NSString *DSHLocalProjectBindingDigest(NSDictionary *binding) {
-  if (![binding isKindOfClass:NSDictionary.class]) return nil;
-  NSMutableDictionary *privateFields = [binding mutableCopy];
-  [privateFields removeObjectForKey:@"git_directory_url"];
-  NSData *canonical = DSHWorkspaceCanonicalJSONData(privateFields, nil);
-  return DSHWorkspaceSHA256Hex(canonical);
+  id digest = DSHLocalProjectReduce(@"binding_digest", @{
+    @"binding" : DSHLocalProjectBindingFields(binding) ?: NSNull.null,
+  })[@"digest"];
+  return [digest isKindOfClass:NSString.class] ? digest : nil;
 }
 
 static BOOL DSHLocalProjectRootRefIsValid(NSDictionary *rootRef,
                                           BOOL projectRequired,
                                           NSUInteger *revisionOut) {
-  if (!DSHDictionaryHasExactKeys(rootRef, @[
-        @"schema_version", @"workspace_id", @"binding_revision", @"project_id"
-      ]) ||
-      ![rootRef[@"schema_version"] isKindOfClass:NSNumber.class] ||
-      DSHLocalProjectIsBoolean(rootRef[@"schema_version"]) ||
-      [rootRef[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
-      ![rootRef[@"schema_version"] isEqual:@1] ||
-      ![rootRef[@"workspace_id"] isKindOfClass:NSString.class] ||
-      ![DSHLocalProjectAccess isCanonicalProjectId:rootRef[@"workspace_id"]] ||
-      !DSHLocalProjectSafeRevision(rootRef[@"binding_revision"], revisionOut)) {
+  if (![DSHLocalProjectReduce(@"root_ref_valid", @{
+        @"root_ref" : [rootRef isKindOfClass:NSDictionary.class] ? rootRef
+                                                                 : NSNull.null,
+        @"project_required" : projectRequired ? @YES : @NO,
+      })[@"valid"] isEqual:@YES]) {
     return NO;
   }
-  id project = rootRef[@"project_id"];
-  return project == NSNull.null
-             ? !projectRequired
-             : [project isKindOfClass:NSString.class] &&
-                   [DSHLocalProjectAccess isCanonicalProjectId:project];
+  // The revision is handed back to the caller as a number it can hold; the
+  // rule has already said it is one.
+  if (revisionOut != nullptr) {
+    *revisionOut = [rootRef[@"binding_revision"] unsignedIntegerValue];
+  }
+  return YES;
 }
 
 static NSDictionary *DSHLocalProjectCanonicalRootRef(NSDictionary *rootRef) {
-  NSUInteger revision = 0;
-  if (!DSHLocalProjectRootRefIsValid(rootRef, NO, &revision)) return nil;
-  id project = rootRef[@"project_id"];
-  return @{
-    @"schema_version" : @1,
-    @"workspace_id" : [rootRef[@"workspace_id"] copy],
-    @"binding_revision" : @(revision),
-    @"project_id" : project == NSNull.null ? NSNull.null : [project copy],
-  };
+  id canonical = DSHLocalProjectReduce(@"canonical_root_ref", @{
+    @"root_ref" : [rootRef isKindOfClass:NSDictionary.class] ? rootRef
+                                                             : NSNull.null,
+  })[@"root_ref"];
+  return [canonical isKindOfClass:NSDictionary.class] ? canonical : nil;
 }
 
 static BOOL DSHSameNode(const struct stat &left, const struct stat &right);
@@ -219,79 +223,71 @@ static NSString *DSHApplyTrustedSystemAliases(NSString *path) {
   return path;
 }
 
-static BOOL DSHIsCanonicalUUIDText(NSString *component) {
-  if (component.length != 36) return NO;
-  NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:component];
-  return uuid != nil &&
-      [uuid.UUIDString.lowercaseString isEqualToString:component.lowercaseString];
-}
-
-// True when components[index-3..index] read Containers/Data/Application/
-// <UUID> — the shared tail of both container layouts:
-//   device:    /private/var/mobile/Containers/Data/Application/<UUID>/...
-//   simulator: <...>/CoreSimulator/Devices/<uuid>/data/Containers/Data/
-//              Application/<uuid>/...
-static BOOL DSHComponentsEndWithAppContainer(NSArray<NSString *> *components,
-                                             NSUInteger index) {
-  return index >= 3 && [components[index - 3] isEqual:@"Containers"] &&
-      [components[index - 2] isEqual:@"Data"] &&
-      [components[index - 1] isEqual:@"Application"] &&
-      DSHIsCanonicalUUIDText(components[index]);
-}
-
-static NSUInteger DSHLastAppContainerComponentIndex(
-    NSArray<NSString *> *components) {
-  for (NSUInteger index = components.count; index > 0; index--) {
-    NSUInteger candidate = index - 1;
-    if (DSHComponentsEndWithAppContainer(components, candidate)) {
-      return candidate;
-    }
-  }
-  return NSNotFound;
-}
-
-static BOOL DSHComponentsHavePrefix(NSArray<NSString *> *components,
-                                    NSArray<NSString *> *prefix) {
-  if (prefix.count > components.count) return NO;
-  for (NSUInteger index = 0; index < prefix.count; index++) {
-    if (![components[index] isEqual:prefix[index]]) return NO;
-  }
-  return YES;
-}
-
-// Traversal components anywhere in the path are refused at derivation time
-// (the strict walk also refuses them, but failing early keeps the anchor
-// itself from ever being derived from a traversal-shaped path).
-static BOOL DSHComponentsContainTraversal(NSArray<NSString *> *components) {
-  for (NSString *component in components) {
-    if ([component isEqual:@"."] || [component isEqual:@".."]) return YES;
-  }
-  return NO;
+// Where a path stops being the app's own container lives in the shared core
+// (modules/rish/core, `rish_agent_container_anchor_reduce`). Splitting a path
+// into components stays here: `pathComponents` is Foundation's, and it keeps a
+// leading "/" that a naive split would not.
+static NSArray<NSString *> *DSHContainerAnchorComponents(NSString *path) {
+  return [path isKindOfClass:NSString.class] ? path.pathComponents : nil;
 }
 
 NSUInteger DSHContainerAnchorSegmentCountForPaths(NSString *targetPath,
                                                   NSString *containerRootPath) {
-  if (![targetPath isKindOfClass:NSString.class] ||
-      ![containerRootPath isKindOfClass:NSString.class]) {
+  NSArray<NSString *> *target = DSHContainerAnchorComponents(targetPath);
+  NSArray<NSString *> *root = DSHContainerAnchorComponents(containerRootPath);
+  if (target == nil || root == nil) return NSNotFound;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:@{
+    @"op" : @"anchor_segment_count",
+    @"target" : target,
+    @"container_root" : root,
+  } options:0 error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_container_anchor_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return NSNotFound;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  if (![reply isKindOfClass:NSDictionary.class] ||
+      ![reply[@"ok"] isEqual:@YES]) {
     return NSNotFound;
   }
-  NSArray<NSString *> *components = targetPath.pathComponents;
-  NSArray<NSString *> *containerComponents = containerRootPath.pathComponents;
-  NSUInteger rootIndex = DSHLastAppContainerComponentIndex(containerComponents);
-  if (DSHComponentsContainTraversal(components) ||
-      DSHComponentsContainTraversal(containerComponents) ||
-      rootIndex == NSNotFound || rootIndex + 1 != containerComponents.count ||
-      !DSHComponentsHavePrefix(components, containerComponents)) {
+  id segments = reply[@"segments"];
+  return [segments isKindOfClass:NSNumber.class]
+      ? [segments unsignedIntegerValue]
+      : NSNotFound;
+}
+
+// One component list in, one index out. `op` and `key` name which of the two
+// index-shaped answers is wanted.
+static NSUInteger DSHContainerAnchorIndex(NSString *op, NSString *key,
+                                          NSArray<NSString *> *components) {
+  if (components == nil) return NSNotFound;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:@{
+    @"op" : op,
+    [op isEqual:@"scan_segment_count"] ? @"target" : @"components" : components,
+  } options:0 error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_container_anchor_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return NSNotFound;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  if (![reply isKindOfClass:NSDictionary.class] ||
+      ![reply[@"ok"] isEqual:@YES]) {
     return NSNotFound;
   }
-  return rootIndex;
+  id index = reply[key];
+  return [index isKindOfClass:NSNumber.class] ? [index unsignedIntegerValue]
+                                              : NSNotFound;
 }
 
 NSUInteger DSHContainerRootScanSegmentCount(NSString *path) {
   if (![path isKindOfClass:NSString.class]) return NSNotFound;
-  NSArray<NSString *> *components = path.pathComponents;
-  if (DSHComponentsContainTraversal(components)) return NSNotFound;
-  return DSHLastAppContainerComponentIndex(components);
+  // The same rule without a root to check against.
+  return DSHContainerAnchorIndex(@"scan_segment_count", @"segments",
+                                 path.pathComponents);
 }
 
 BOOL DSHLocalProjectAccessValidateWorkspaceRootRefV1(
@@ -377,8 +373,8 @@ static int DSHOpenAnchoredAbsoluteDirectory(
     } else {
       NSString *physicalHome = DSHApplyTrustedSystemAliases(homePath);
       NSArray<NSString *> *homeComponents = physicalHome.pathComponents;
-      NSUInteger homeRootIndex =
-          DSHLastAppContainerComponentIndex(homeComponents);
+      NSUInteger homeRootIndex = DSHContainerAnchorIndex(
+          @"last_app_container_index", @"index", homeComponents);
       if (homeRootIndex != NSNotFound &&
           homeRootIndex + 1 == homeComponents.count) {
         containerRootPath = physicalHome;
@@ -1416,28 +1412,10 @@ static NSDictionary *DSHReadMetadata(int projectDescriptor,
 }
 
 static BOOL DSHValidStoredMetadataRecord(NSDictionary *record) {
-  if (!DSHDictionaryHasExactKeys(record, @[
-        @"schema_version", @"name", @"created_at", @"updated_at",
-        @"origin_url"
-      ]) || ![record[@"schema_version"] isEqual:@1]) {
-    return NO;
-  }
-  NSString *name = [record[@"name"] isKindOfClass:NSString.class]
-      ? record[@"name"] : nil;
-  NSString *created = [record[@"created_at"] isKindOfClass:NSString.class]
-      ? record[@"created_at"] : nil;
-  NSString *updated = [record[@"updated_at"] isKindOfClass:NSString.class]
-      ? record[@"updated_at"] : nil;
-  id origin = record[@"origin_url"];
-  NSUInteger nameBytes = [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-  return nameBytes > 0 && nameBytes <= 120 && !DSHHasControlCharacter(name) &&
-         ![name containsString:@"/"] && ![name containsString:@"\\"] &&
-         created.length >= 20 && created.length <= 64 &&
-         updated.length >= 20 && updated.length <= 64 &&
-         !DSHHasControlCharacter(created) && !DSHHasControlCharacter(updated) &&
-         (origin == NSNull.null ||
-          ([origin isKindOfClass:NSString.class] && [origin length] <= 4096 &&
-           !DSHHasControlCharacter(origin)));
+  return [DSHLocalProjectReduce(@"stored_metadata_valid", @{
+    @"record" : [record isKindOfClass:NSDictionary.class] ? record
+                                                          : NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static BOOL DSHWriteAllBytes(int descriptor, NSData *data) {
@@ -1784,19 +1762,14 @@ static BOOL DSHPathsEqual(NSString *left, NSString *right) {
 }
 
 static BOOL DSHLocalProjectCanonicalLegacyDisplayName(id value) {
-  if (![value isKindOfClass:NSString.class]) return NO;
-  NSString *name = value;
-  NSString *normalized = [name precomposedStringWithCanonicalMapping];
-  NSData *bytes = [name dataUsingEncoding:NSUTF8StringEncoding
-                     allowLossyConversion:NO];
-  NSString *trimmed = [name
-      stringByTrimmingCharactersInSet:
-          NSCharacterSet.whitespaceAndNewlineCharacterSet];
-  return [normalized isEqual:name] && bytes.length > 0 && bytes.length <= 120 &&
-      [trimmed isEqual:name] && ![name hasPrefix:@"."] &&
-      ![name isEqual:@"."] && ![name isEqual:@".."] &&
-      ![name containsString:@"/"] && ![name containsString:@"\\"] &&
-      ![name containsString:@":"] && !DSHHasControlCharacter(name);
+  NSString *trimmed = [value isKindOfClass:NSString.class]
+      ? [value stringByTrimmingCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet]
+      : nil;
+  return [DSHLocalProjectReduce(@"legacy_display_name", @{
+    @"value" : value ?: NSNull.null,
+    @"foundation_trimmed" : trimmed ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static BOOL DSHLocalProjectLegacyEvidenceNode(

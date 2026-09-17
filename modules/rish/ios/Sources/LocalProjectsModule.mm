@@ -5,6 +5,8 @@
 #import <Security/Security.h>
 #import <UIKit/UIKit.h>
 
+#include "rish_agent_core.h"
+
 #import "DSHGitPushSupport.h"
 #import "DSHGitSSHSupport.h"
 #import "LocalProjectAccess.h"
@@ -110,13 +112,30 @@ static BOOL LPV2SafeRevision(id value) {
       exact <= 9007199254740991ULL;
 }
 
+// What a project operation's arguments have to be, and which code a failure is
+// reported to JavaScript as, live in the shared core (modules/rish/core,
+// `rish_agent_project_module_reduce`).
+static NSDictionary *LPV2Reduce(NSString *op, NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_project_module_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
 static BOOL LPV2CanonicalOID(id value, BOOL allowNull) {
-  if (allowNull && value == NSNull.null) return YES;
-  NSString *oid = LPString(value);
-  if (oid.length != 40) return NO;
-  NSCharacterSet *hex =
-      [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
-  return [oid rangeOfCharacterFromSet:hex.invertedSet].location == NSNotFound;
+  return [LPV2Reduce(@"canonical_oid", @{
+    @"value" : value ?: NSNull.null,
+    @"allow_null" : allowNull ? @YES : @NO,
+  })[@"valid"] isEqual:@YES];
 }
 
 static BOOL LPV2CanonicalDigest(id value) {
@@ -128,20 +147,18 @@ static BOOL LPV2CanonicalDigest(id value) {
 }
 
 static BOOL LPV2CanonicalOperationId(id value) {
-  NSString *candidate = LPString(value);
-  if (candidate.length != 36 ||
-      ![candidate isEqualToString:candidate.lowercaseString]) return NO;
-  NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:candidate];
-  return uuid != nil && [uuid.UUIDString.lowercaseString isEqual:candidate];
+  return [LPV2Reduce(@"canonical_operation_id", @{
+    @"value" : value ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static BOOL LPV2BoundedString(id value, NSUInteger maximumBytes,
                               BOOL allowEmpty) {
-  NSString *string = LPString(value);
-  NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding
-                         allowLossyConversion:NO];
-  return string != nil && data != nil && data.length <= maximumBytes &&
-      (allowEmpty || string.length > 0) && !LPHasControlCharacter(string);
+  return [LPV2Reduce(@"bounded_string", @{
+    @"value" : value ?: NSNull.null,
+    @"maximum_bytes" : @((unsigned long long)maximumBytes),
+    @"allow_empty" : allowEmpty ? @YES : @NO,
+  })[@"valid"] isEqual:@YES];
 }
 
 static NSDictionary *LPV2Root(id value, BOOL projectRequired, NSError **error) {
@@ -237,75 +254,11 @@ static NSDictionary *LPV2ReadAttachJournal(NSURL *url,
 }
 
 static NSString *LPV2StableErrorCode(NSError *error) {
-  if ([error.domain isEqual:@"LocalProjects"]) {
-    switch (error.code) {
-      case 3003:
-      case 3101:
-        return @"E_PROJECT_REQUEST_INVALID";
-      case 3105:
-      case 3106:
-        return @"E_PROJECT_BUSY";
-      case 3104:
-      case 3107:
-        return @"E_PROJECT_STORAGE_UNSAFE";
-      case 3110:
-        return @"E_PROJECT_CONFLICT";
-      case 3111:
-        return @"E_PROJECT_UNAVAILABLE";
-      case 3112:
-        return @"E_WORKSPACE_CONFIRMATION";
-      case 3195:
-        return @"E_PROJECT_CANCELLED";
-      case 3196:
-        return @"E_PROJECT_NON_FAST_FORWARD";
-      case 3197:
-        return @"E_PROJECT_CREDENTIAL";
-      case 3198:
-        return @"E_PROJECT_TIMEOUT";
-      default:
-        return @"E_PROJECT_NATIVE";
-    }
-  }
-  if ([error.domain isEqual:DSHLocalWorkspaceAccessErrorDomain]) {
-    switch ((DSHLocalWorkspaceAccessErrorCode)error.code) {
-      case DSHLocalWorkspaceAccessErrorInvalid:
-        return @"E_WORKSPACE_INVALID";
-      case DSHLocalWorkspaceAccessErrorNotFound:
-        return @"E_WORKSPACE_NOT_FOUND";
-      case DSHLocalWorkspaceAccessErrorBusy:
-      case DSHLocalWorkspaceAccessErrorPickerBusy:
-        return @"E_WORKSPACE_BUSY";
-      case DSHLocalWorkspaceAccessErrorRevisionStale:
-        return @"E_WORKSPACE_REVISION_STALE";
-      case DSHLocalWorkspaceAccessErrorRevoked:
-        return @"E_WORKSPACE_REVOKED";
-      case DSHLocalWorkspaceAccessErrorCapability:
-        return @"E_WORKSPACE_CAPABILITY";
-      case DSHLocalWorkspaceAccessErrorRootChanged:
-        return @"E_WORKSPACE_ROOT_CHANGED";
-      case DSHLocalWorkspaceAccessErrorConflict:
-        return @"E_WORKSPACE_CONFLICT";
-      case DSHLocalWorkspaceAccessErrorPersistence:
-        return @"E_WORKSPACE_PERSISTENCE";
-      case DSHLocalWorkspaceAccessErrorIO:
-        return @"E_WORKSPACE_IO";
-      default:
-        return @"E_WORKSPACE_UNAVAILABLE";
-    }
-  }
-  if ([error.domain isEqual:DSHLocalProjectAccessErrorDomain]) {
-    switch ((DSHLocalProjectAccessErrorCode)error.code) {
-      case DSHLocalProjectAccessErrorInvalidIdentifier:
-        return @"E_PROJECT_REQUEST_INVALID";
-      case DSHLocalProjectAccessErrorUnsafeStorage:
-        return @"E_PROJECT_STORAGE_UNSAFE";
-      case DSHLocalProjectAccessErrorLockTimeout:
-        return @"E_PROJECT_BUSY";
-      default:
-        return @"E_PROJECT_UNAVAILABLE";
-    }
-  }
-  return @"E_PROJECT_NATIVE";
+  id code = LPV2Reduce(@"stable_error_code", @{
+    @"domain" : error.domain ?: @"",
+    @"code" : @((long long)error.code),
+  })[@"code"];
+  return [code isKindOfClass:NSString.class] ? code : @"E_PROJECT_NATIVE";
 }
 
 static void LPV2Reject(RCTPromiseRejectBlock reject, NSError *error) {
@@ -333,22 +286,19 @@ static NSString *LPV2ProjectDisplayName(DSHLocalProjectLease *lease) {
 
 static NSString *LPV2ClipUTF8(NSString *value, NSUInteger maximumBytes,
                               BOOL *truncated) {
-  NSData *data = [value dataUsingEncoding:NSUTF8StringEncoding
-                         allowLossyConversion:NO];
-  if (data == nil || data.length <= maximumBytes) {
+  NSDictionary *reply = [value isKindOfClass:NSString.class]
+      ? LPV2Reduce(@"clip_utf8", @{
+          @"value" : value,
+          @"maximum_bytes" : @((unsigned long long)maximumBytes),
+        })
+      : nil;
+  id clipped = reply[@"value"];
+  if (![clipped isKindOfClass:NSString.class]) {
     if (truncated != nullptr) *truncated = NO;
-    return value;
+    return value ?: @"";
   }
-  NSUInteger take = maximumBytes;
-  NSString *clipped = nil;
-  while (take > 0 && clipped == nil) {
-    clipped = [[NSString alloc]
-        initWithData:[data subdataWithRange:NSMakeRange(0, take)]
-            encoding:NSUTF8StringEncoding];
-    if (clipped == nil) take -= 1;
-  }
-  if (truncated != nullptr) *truncated = YES;
-  return clipped ?: @"";
+  if (truncated != nullptr) *truncated = [reply[@"truncated"] isEqual:@YES];
+  return clipped;
 }
 
 static NSString *LPNow(void) {

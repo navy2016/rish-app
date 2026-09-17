@@ -315,7 +315,7 @@ static NSString *const Operation = @"22222222-2222-4222-8222-222222222222";
     }
   }
 }
-- (void)testExecutionTimeoutExtendsOnlyValidatedJavaSourceEntries {
+- (void)testExecutionTimeoutExtendsOnlyCompilingLaunchersAndValidatedJavaSource {
   NSArray<NSArray *> *cases = @[
     @[@"java", @"Main.java", @1200000],
     @[@"java", @"Main.JAVA", @1200000],
@@ -333,10 +333,16 @@ static NSString *const Operation = @"22222222-2222-4222-8222-222222222222";
     @[@"python", @"Main.java", @600000],
     @[@"node", @"Main.JAVA", @600000],
     @[@"bun", @"Main.java", @600000],
-    @[@"go", @"Main.java", @600000],
-    @[@"rust", @"Main.java", @600000],
     @[@"unknown", @"Main.java", @600000],
     @[@"JAVA", @"Main.java", @600000],
+    // Their launchers always compile, so the entry cannot shorten the bound.
+    @[@"go", @"main.go", @1200000],
+    @[@"go", @"Main.java", @1200000],
+    @[@"go", @"", @1200000],
+    @[@"rust", @"main.rs", @1200000],
+    @[@"rust", @"Main.java", @1200000],
+    @[@"GO", @"main.go", @600000],
+    @[@"Rust", @"main.rs", @600000],
   ];
   for (NSArray *testCase in cases) {
     NSUInteger timeout = [DSHRuntimeProgramVM executionTimeoutMillisecondsForFamily:testCase[0]

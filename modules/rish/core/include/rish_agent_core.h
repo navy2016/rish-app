@@ -121,10 +121,13 @@ char *rish_agent_tool_registry_reduce(const char *json, size_t json_length);
 char *rish_agent_policy_reduce(const char *json, size_t json_length);
 
 /// One chat-read-v1 project-context policy decision over {"op",...}:
-/// normalize, path_decision. Which of a repository may be sent to a model is
-/// decided here; case folding stays with the host, because Foundation folds
-/// with CFStringFold and the core carries no folding table.
-char *rish_agent_project_context_reduce(const char *json, size_t json_length);
+/// normalize, path_decision, content_decision. Which of a repository may be
+/// sent to a model is decided here; case folding stays with the host, because
+/// Foundation folds with CFStringFold and the core carries no folding table.
+/// `content` carries a file's raw bytes for content_decision (any bytes, empty
+/// allowed) and may be NULL for the other ops.
+char *rish_agent_project_context_reduce(const char *json, size_t json_length,
+                                        const uint8_t *content, size_t content_length);
 
 /// Parses one provider completion response over
 /// {"op":"parse","response","requested_model","model_supported","thinking_mode",
@@ -141,6 +144,129 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 /// the id it will have are decided here — predicting that id is what makes a
 /// crash between writing the object and recording it recoverable.
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
+
+/// One project-module decision over {"op",...}: canonical_oid,
+/// canonical_operation_id, bounded_string, clip_utf8, stable_error_code.
+/// JavaScript branches on the stable code, so the mapping from an internal
+/// failure in one of three domains is contract; an unrecognised failure is
+/// E_PROJECT_NATIVE rather than a guess.
+char *rish_agent_project_module_reduce(const char *json, size_t json_length);
+
+/// One project-context-bridge decision over {"op",...}: safe_relative_path,
+/// bounded_string. A reported path stays inside the project: no leading slash,
+/// no backslash, no NUL, no control or format characters, and every component
+/// a real name. This is not the agent's tool-argument path rule; the two have
+/// different bounds and are deliberately kept apart.
+char *rish_agent_project_context_bridge_reduce(const char *json, size_t json_length);
+
+/// One project-context-service decision over {"op",...}: reference_id,
+/// roots_equal, canonical_digest, bounded_string. The reference id is derived
+/// from the whole authority tuple rather than chosen, so two workspaces using
+/// one conversation id cannot evict or authorise one another's snapshot.
+char *rish_agent_project_context_service_reduce(const char *json, size_t json_length);
+
+/// One project-context-store decision over {"op",...}: canonical_snapshot_id,
+/// safe_reference_key, hex_digest, settable_reference_key,
+/// prepare_transaction_key, recover_references. A reference is a name pointing
+/// at a snapshot; only retry: keys may be set by a caller, and a txn:prepare:
+/// key still present at launch means the process died mid-swap.
+char *rish_agent_project_context_store_reduce(const char *json, size_t json_length);
+
+/// One container-anchor decision over {"op",...}: anchor_segment_count,
+/// last_app_container_index, canonical_uuid_text. Where a path stops being the
+/// app's own container: the innermost Containers/Data/Application/<UUID> tail
+/// wins, a root carrying anything after its UUID is not a root, and traversal
+/// is refused before an anchor is derived. Splitting the path stays with the
+/// host.
+char *rish_agent_container_anchor_reduce(const char *json, size_t json_length);
+
+/// One project-access decision over {"op",...}: root_ref_valid,
+/// canonical_root_ref, binding_valid, binding_digest, stored_metadata_valid,
+/// legacy_display_name. A binding restates its root reference's identity and
+/// the root fingerprint, so it cannot be read as belonging to a root it was
+/// not written for. Its digest leaves out the private git directory path,
+/// which differs between installs of one project.
+char *rish_agent_project_access_reduce(const char *json, size_t json_length);
+
+/// One workspace-clearance decision over {"op",...}: operation_shape,
+/// receipt_shape, session_reference_valid, receipt_authorises. A clearance is
+/// the proof that a destructive workspace operation was authorised against a
+/// specific committed session, so its receipt names that session's generation
+/// and digest. Its bounds are the workspace receipt store's, not a second set.
+char *rish_agent_workspace_clearance_reduce(const char *json, size_t json_length);
+
+/// One workspace-error decision over {"op",...}: projection, codes. Which
+/// public code and message a workspace failure is reported as. A caller
+/// branches on the code and a person's retry depends on it, so the mapping is
+/// contract rather than a lookup table. A number this engine does not define
+/// projects to null; no code is invented for it.
+char *rish_agent_workspace_error_reduce(const char *json, size_t json_length);
+
+/// Whether stored workspace bytes are JSON this engine will look at: one
+/// complete value, at most 64 levels and 100,000 nodes, no duplicate keys in
+/// any object, no negative zero, and nothing after it. Takes the raw bytes
+/// rather than an envelope, because the question is about bytes that may not
+/// be JSON. Returns 1 for acceptable, 0 otherwise.
+unsigned char rish_agent_workspace_json_bounded(const char *bytes, size_t length);
+
+/// One workspace-journal decision over {"op",...}: journal_shape,
+/// legacy_journal_shape, readable_journal, identity_present, identity_matches,
+/// owned_authority_matches, create_request_sha256, bootstrap_request_sha256.
+/// A journal binds itself to its own request, a phase says which digests exist
+/// yet, and physical identity is recorded in fours. Statting stays with the
+/// host: it passes st_dev/st_ino/st_uid/st_gid as the canonical decimal
+/// strings the journal holds.
+char *rish_agent_workspace_journal_reduce(const char *json, size_t json_length);
+
+/// One workspace read-tool decision over {"op",...}: tool_name_valid,
+/// tool_options_valid, output_length_valid, tools. The tool list is closed —
+/// six named readers over a folder a person granted — and an option key the
+/// rule does not recognise is refused rather than ignored.
+char *rish_agent_workspace_read_tools_reduce(const char *json, size_t json_length);
+
+/// One workspace-receipt decision over {"op",...}: receipt_shape,
+/// legacy_receipt_shape, readable_receipt, store_shape, public_receipt,
+/// expired. The public projection withholds request_sha256, which is how a
+/// retry is recognised. Parsing the committed timestamp stays with the host;
+/// it passes the age it measured, and an unreadable one counts as expired.
+char *rish_agent_workspace_receipt_reduce(const char *json, size_t json_length);
+
+/// One workspace-record decision over {"op",...}: record_shape, display_name,
+/// capabilities_array, binding_revision_advance. The origin fixes the locator
+/// kind, the location class and which optional identity is present; folding
+/// stays with the host, because Foundation folds case and diacritics together
+/// under en_US_POSIX.
+char *rish_agent_workspace_record_reduce(const char *json, size_t json_length);
+
+/// One workspace-authority decision over {"op",...}: owned, bookmark, granted,
+/// legacy, their three migrations, legacy_physical_identity, legacy_evidence,
+/// capabilities_set, legacy_identity_matches_authority and
+/// ordered_capabilities. Each shape restates its record's identity and ends in
+/// the fingerprint. Base64 decoding stays with the host: the decoded
+/// bookmark's length and SHA-256 come in as facts, the cap and the match stay
+/// in the core. A migration answers with an authority, or null when the one it
+/// was given cannot be upgraded.
+char *rish_agent_workspace_authority_reduce(const char *json, size_t json_length);
+
+/// One workspace directory-name decision over {"op",...}: internal_component,
+/// candidate. The host walks ordinals and folds each candidate, because
+/// folding is host-specific; what each ordinal is called, and where a name is
+/// cut to make room for its suffix, are the rule. Truncation is a projection:
+/// the host supplies the display name's grapheme clusters, the core picks the
+/// cut, so a cluster is never split.
+char *rish_agent_workspace_directory_name_reduce(const char *json, size_t json_length);
+
+/// One workspace-grant decision over {"op",...}: operational_grants,
+/// descriptor. Which grants a locator kind implies and how they are shown;
+/// deriving the status itself stays with the host, because it resolves a
+/// bookmark and stats a directory.
+char *rish_agent_workspace_grants_reduce(const char *json, size_t json_length);
+
+/// One workspace root-fingerprint decision over {"op",...}: fingerprint,
+/// authority_digest, fingerprint_input, fingerprint_valid. This is what binds
+/// a workspace authority to a physical directory, so an authority written by
+/// one platform must validate on the other.
+char *rish_agent_workspace_fingerprint_reduce(const char *json, size_t json_length);
 
 /// One workspace-tool decision over {"op",...}: bounds, path_components,
 /// revision, directory_entry_decision, directory_listing, diff_preview,

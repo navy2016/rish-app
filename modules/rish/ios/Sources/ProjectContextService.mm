@@ -6,6 +6,8 @@
 #import <CommonCrypto/CommonDigest.h>
 
 #import "DSHWorkspaceCanonical.h"
+
+#include "rish_agent_core.h"
 #import "LocalProjectAccessInternals.h"
 #import "LocalWorkspaceAccess.h"
 
@@ -17,6 +19,25 @@
 #include <unistd.h>
 
 static NSString *DSHServiceSHA256(NSData *data);
+
+// The project-access reducer, for the root reference rule this file shares
+// with LocalProjectAccess.
+static NSDictionary *DSHProjectAccessReduce(NSString *op,
+                                            NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_project_access_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
 static NSData *DSHCanonicalJSON(id object);
 
 @interface DSHLocalWorkspaceAccess (DSHContextLegacyBoundPrivate)
@@ -287,32 +308,37 @@ static BOOL DSHServiceSafeRevision(id value, NSUInteger *revisionOut) {
   return YES;
 }
 
+// How a snapshot reference is named, and what a v2 argument has to be, live in
+// the shared core (modules/rish/core,
+// `rish_agent_project_context_service_reduce`). The root reference rule is the
+// one `project_access` owns; this file used to carry a second copy of it.
+static NSDictionary *DSHServiceReduce(NSString *op, NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_project_context_service_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
 static NSDictionary *DSHServiceV2RootRef(id value, BOOL projectRequired) {
   NSDictionary *root = [value isKindOfClass:NSDictionary.class] ? value : nil;
-  if (!DSHServiceExactKeys(root, @[
-        @"schema_version", @"workspace_id", @"binding_revision", @"project_id"
-      ]) ||
-      ![root[@"schema_version"] isKindOfClass:NSNumber.class] ||
-      DSHServiceIsBoolean(root[@"schema_version"]) ||
-      [root[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
-      ![root[@"schema_version"] isEqual:@1] ||
-      ![DSHLocalProjectAccess isCanonicalProjectId:root[@"workspace_id"]]) {
-    return nil;
-  }
-  NSUInteger revision = 0;
-  if (!DSHServiceSafeRevision(root[@"binding_revision"], &revision)) return nil;
-  id project = root[@"project_id"];
-  if (project == NSNull.null) {
-    if (projectRequired) return nil;
-  } else if (![DSHLocalProjectAccess isCanonicalProjectId:project]) {
-    return nil;
-  }
-  return @{
-    @"schema_version" : @1,
-    @"workspace_id" : [root[@"workspace_id"] copy],
-    @"binding_revision" : @(revision),
-    @"project_id" : project == NSNull.null ? NSNull.null : [project copy],
-  };
+  id canonical = DSHProjectAccessReduce(@"canonical_root_ref", @{
+    @"root_ref" : root ?: NSNull.null,
+  })[@"root_ref"];
+  if (![canonical isKindOfClass:NSDictionary.class]) return nil;
+  // `canonical_root_ref` answers the project-optional question; asking for a
+  // project is the caller's, and is checked here rather than by deriving a
+  // second canonical form.
+  if (projectRequired && canonical[@"project_id"] == NSNull.null) return nil;
+  return canonical;
 }
 
 static NSString *DSHServiceV2Model(id value) {
@@ -335,18 +361,16 @@ static NSString *DSHServiceV2BoundedString(id value, NSUInteger maxBytes,
 }
 
 static BOOL DSHServiceV2RootsEqual(NSDictionary *left, NSDictionary *right) {
-  NSDictionary *a = DSHServiceV2RootRef(left, NO);
-  NSDictionary *b = DSHServiceV2RootRef(right, NO);
-  return a != nil && b != nil && [a isEqual:b];
+  return [DSHServiceReduce(@"roots_equal", @{
+    @"left" : [left isKindOfClass:NSDictionary.class] ? left : NSNull.null,
+    @"right" : [right isKindOfClass:NSDictionary.class] ? right : NSNull.null,
+  })[@"equal"] isEqual:@YES];
 }
 
 static BOOL DSHServiceCanonicalDigest(id value) {
-  if (![value isKindOfClass:NSString.class] || [value length] != 64) {
-    return NO;
-  }
-  NSCharacterSet *hex =
-      [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
-  return [value rangeOfCharacterFromSet:hex.invertedSet].location == NSNotFound;
+  return [DSHServiceReduce(@"canonical_digest", @{
+    @"value" : value ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 // ProjectContextStore's prepare protocol names its transaction by the suffix
@@ -357,29 +381,12 @@ static BOOL DSHServiceCanonicalDigest(id value) {
 static NSString *DSHServiceV2ReferenceId(NSDictionary *root,
                                          NSString *rootFingerprint,
                                          NSString *conversationId) {
-  if (root == nil || !DSHServiceCanonicalDigest(rootFingerprint) ||
-      !DSHServiceCanonicalIdentifier(conversationId)) {
-    return nil;
-  }
-  NSData *body = DSHWorkspaceCanonicalJSONData(@{
-    @"root" : root,
-    @"root_fingerprint_sha256" : rootFingerprint,
-    @"conversation_id" : conversationId,
-  }, nil);
-  if (body == nil) return nil;
-  NSData *domain = [@"rish.project-context-reference.v2\0"
-      dataUsingEncoding:NSUTF8StringEncoding];
-  NSMutableData *preimage = [NSMutableData dataWithData:domain];
-  [preimage appendData:body];
-  uint8_t digest[CC_SHA256_DIGEST_LENGTH] = {};
-  CC_SHA256(preimage.bytes, (CC_LONG)preimage.length, digest);
-  digest[6] = (uint8_t)((digest[6] & 0x0f) | 0x40);
-  digest[8] = (uint8_t)((digest[8] & 0x3f) | 0x80);
-  return [NSString stringWithFormat:
-      @"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-      digest[0], digest[1], digest[2], digest[3], digest[4], digest[5],
-      digest[6], digest[7], digest[8], digest[9], digest[10], digest[11],
-      digest[12], digest[13], digest[14], digest[15]];
+  id derived = DSHServiceReduce(@"reference_id", @{
+    @"root" : [root isKindOfClass:NSDictionary.class] ? root : NSNull.null,
+    @"root_fingerprint_sha256" : rootFingerprint ?: NSNull.null,
+    @"conversation_id" : conversationId ?: NSNull.null,
+  })[@"reference_id"];
+  return [derived isKindOfClass:NSString.class] ? derived : nil;
 }
 
 static NSString *const DSHServiceV2PrepareNoPriorSnapshotId =

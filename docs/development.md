@@ -867,6 +867,33 @@ values are pinned in the core's tests — a change to the table changes them and
 invalidates every authority on every device, which is exactly the kind of
 change that should be hard to make by accident.
 
+### The approval preview's bounds, pinned
+
+The preview is what a person reads before approving a write, so what its bounds
+**hide** is as much the rule as what they show. Seven cases are now pinned
+against `DSHAgentApprovalUnifiedDiff` as it stood at `8e33d06`, the last commit
+before it moved into the core:
+
+- the hunk header names where the change starts, one-based, and counts the
+  whole change rather than the part shown;
+- three unchanged lines of context either side, both taken from the prior;
+- at most 24 lines each way, with `…` between the added lines and the trailing
+  context; exactly 24 is not truncation;
+- **past 2,000 lines both sides are cut before anything is compared**, so a
+  change below that line is not elided from the hunk — it is never seen, and
+  the truncation flag is the only thing that says so. That is why the flag may
+  only ever be raised;
+- over 4,096 bytes the preview is cut to half the budget on a character
+  boundary, with `…` appended;
+- an insertion or deletion anchors on what did not move rather than reporting
+  the whole file;
+- a file ending in a newline has a trailing empty line, which anchors the
+  suffix and is then emitted as a context line that renders as a lone space.
+  Odd-looking, and exactly what the original did.
+
+Both bounds were verified load-bearing by widening them and watching the
+assertions fail.
+
 ### What a person is told the agent may do
 
 `AgentPolicyService`'s describe result is a *safe projection*: it is handed to
@@ -921,6 +948,15 @@ Two properties worth naming because a port loses them quietly:
   character is read.** Normalizing first would do work proportional to a
   hostile input that is about to be refused. That check stays on the host side
   of the call; the core bounds the path too, but by then the copy has happened.
+
+`decisionForContentData:` moved with it. Its order is the rule — a file over
+budget is refused before its bytes are looked at, a NUL makes it binary before
+it is decoded, and only then does encoding matter — and one Foundation detail
+had to be reproduced rather than tidied up: the control scan walks **UTF-16
+code units**, because `characterIsMember:` takes a `unichar`. A format
+character outside the BMP arrives as two surrogates, neither of which is a
+control character, so it passes. Writing that scan over code *points* in Rust
+would have made the core stricter than the rule it was replacing.
 
 The second one was a regression this cut introduced and
 `testPublicStringInputsAreBoundedBeforeNormalization` caught it — it hands the
@@ -1073,6 +1109,796 @@ its tests called the functions directly — and the iOS suite went from 9 failur
 to 25. `the_reducer_answers_every_op_it_claims_to` now drives every op through
 `reduce_json` itself and fails against that bug. **A reducer needs a test that
 goes through the reducer**, not only through the functions behind it.
+
+### What a stored workspace record looks like
+
+`workspace_record.rs` is the third workspace rule, after the fingerprint and
+the grants: it is the record those two are computed over.
+
+**The origin fixes everything else.** A record does not get to name a locator
+kind, a location class, an owned directory and a legacy project independently —
+each origin fixes all four, and a record that mixes them is not a record. A
+documents-owned origin has a directory name and no legacy project; a granted
+folder has neither; a legacy origin has a project and no directory.
+
+Two rules worth naming:
+
+- **A capability array has one spelling.** At most four, each known, no
+  repeats, in the fixed order — so a stored record digests the same everywhere,
+  which matters because the fingerprint covers it.
+- **A binding revision advances by exactly one.** A gap would let two rebinds
+  look like one, and a repeat would let a stale authority pass as current.
+  Running out of safe integers is its own answer, not a conflict: at the top of
+  the range that binding can never be rebound again.
+
+Case-and-diacritic folding stays with the host. Foundation folds both together
+under `en_US_POSIX` — neither lowercasing nor the case folding the
+project-context policy uses — and the reserved-name check (`rish workspaces`,
+the `.rish-` prefix) is on the folded spelling so case and diacritics cannot
+dodge it. A host that could not fold refuses rather than guessing.
+
+### Android resolves a root
+
+`AndroidAgentRootResolver.kt` turns a workspace binding into the root an agent
+attempt runs against, and `AndroidPreparedAttemptStore` now prepares one for
+real instead of refusing every rooted request.
+
+**What an Android workspace root can do: read and write files.** The registry
+grants read, write and git, but the shared rule only turns `git` into Agent Git
+capabilities for a *project* root, and there is no project subsystem here;
+`guest_service` needs the guest CGI tools, which this build does not ship. So
+the projection is exactly `["file_read", "file_write"]`, and the test pins that
+rather than asserting something vaguer.
+
+**A project root is refused, not approximated.** A project root needs an
+independently verified lease. Answering a project request with a workspace root
+wearing a project's name would hand the caller authority it never established.
+
+**The session store now accepts workspace-bound conversations.** It used to
+refuse `workspace_id` and `workspace_binding` outright, which made the
+root-stale branch unreachable — the request and the stored attempt always
+disagreed first, so a test that looked like it covered rooted requests covered
+nothing of the sort. `project_id` and `project_context` stay refused. Whether a
+binding can still be *proved* is decided where it is used: a session records
+what the person chose, the resolver decides what that is still worth.
+
+`aRootedAttemptResolvesItsWorkspaceAndPreparesForReal` is the first prepared
+attempt on this platform that is not a rejection — an authority and a
+transcript, against a root whose fingerprint is the registry's. Checked by
+mutation: dropping the resolved root from the transaction fails one test, and
+restoring the session store's old refusal fails four.
+
+### Android's workspace registry
+
+`AndroidWorkspaceRegistry.kt` is the first workspace subsystem on Android. It
+writes the same record, authority and fingerprint iOS writes, validated by the
+same shared rules, so growing it later is new code over the same bytes rather
+than a migration.
+
+**Scope, and why.** Only the `rish_created` origin can exist on Android: there
+are no security-scoped bookmarks and no legacy iOS projects, so those two
+shapes are unreachable and are rejected rather than stubbed. There is no
+rebinding either — an app-private directory keeps its identity for as long as
+the app is installed, and the one event that changes it takes the data with it
+— so every record is at binding revision 1 and nothing there exercises
+`binding_revision_advance`.
+
+**Folding is per-host and that is fine.** iOS folds with Foundation under
+`en_US_POSIX`; Android uses NFD with combining marks dropped, lowercased in the
+root locale. The two do not always agree. A folded name is never stored, only
+compared against other names on the same device; everything that *is* stored
+goes through the shared rules.
+
+**Inode reuse.** `aReplacedDirectoryIsNotTheSameRoot` originally deleted the
+directory and recreated it — and passed the old identity straight back, because
+the freed inode is handed out again immediately. The test now moves the
+directory instead, which keeps the old inode allocated, and asserts that the
+replacement really did get a different one so it cannot quietly stop testing.
+Worth naming as a limit of the design: physical identity catches a folder
+swapped for a *different* one, not a folder deleted and rebuilt in its place.
+Neither platform claims otherwise.
+
+The twelve instrumentation tests were checked by breaking three rules: not
+asking whether the record is the right shape, not comparing the directory
+identity, and inventing the fingerprint instead of asking for it. The last one
+fails nine of the twelve.
+
+### Android operations are idempotent now
+
+`AndroidWorkspaceRegistry` had no notion of an operation id: a retry after a
+crash created a *second* workspace where the person asked for one. It has a
+receipt store now, on the rules `workspace_receipt` already held and which
+nothing on Android exercised.
+
+`create` takes an operation id, replays the receipt if one exists, and writes
+one last — **after** the registry. A crash before the receipt leaves an
+unreceipted workspace rather than a receipt for one that is not there; the
+retry then finds no receipt and refuses on the directory that already exists,
+which is a visible failure instead of a silent second workspace.
+
+**A receipt binds the operation to its request.** The same id with a different
+display name is a different operation reusing an id, and it is refused rather
+than answered with somebody else's workspace.
+
+`queryOperation` returns the public projection, which withholds
+`request_sha256` — the same rule iOS follows, for the same reason.
+
+### What a project-context result may say
+
+`project_context_bridge.rs` ports `DSHPCSafeRelativePath` and
+`DSHPCBoundedString` from `LocalProjectContextModule.mm`. The identifier,
+digest and OID rules that file also carried are `project_module`'s, and are
+re-used rather than restated.
+
+**This path rule is not `execution_ledger::relative_path_argument`**, and the
+two are deliberately kept apart. That one bounds an agent's tool *argument* at
+512 bytes and demands NFC; this one bounds a *reported* path at 4096 and does
+not, because it describes a file that already exists rather than naming one to
+act on. It also refuses a `.` component, which the other allows.
+`it_is_not_the_agents_tool_argument_rule` pins three inputs where they
+disagree, so merging them later is a decision rather than an accident.
+
+### The iOS baseline, stated properly
+
+After the container-anchor fix, the persistent failures are **five**:
+`LegacyBoundProjectRootAccessTests
+testVerifiedLegacyRootRunsFileWriteStatusAndCommitEndToEnd` and four
+`RuntimeEnvironmentStoreTests`. Three UI tests —
+`DeviceCloneDriveUITests` twice over and `HarnessEvidenceUITests` — fail on
+some runs and pass on others; a run where all three passed has been observed.
+
+Three further one-off failures were seen across this work and each passed 3/3
+in isolation and did not reproduce on a second full run:
+`AgentProviderRoundServiceTests testSynchronousBoundTaskReturnedByTransportIsNotCancelled`,
+`CompletionV2StreamTests testCancelBeforeTaskBindDoesNotPoisonTheCompletionSlot`
+and `CompletionV2Tests testSchema1RedirectStillFollowsAndCompletes`. All three
+are in async transport paths and none is touched by this work. **Counting them
+as "pre-existing failures" would be wrong in both directions** — they are
+neither stable nor caused here.
+
+### The six readers a workspace exposes
+
+`workspace_read_tools.rs` ports `LWToolNameValid`, `LWToolOptionsValid` and the
+output bound from `LocalWorkspaceModule.mm`.
+
+**The tool list is closed, and that is the point.** These run against a folder
+a person granted, so the surface is six named readers — `cat`, `grep`, `head`,
+`tail`, `wc`, `sha256sum` — and nothing else. Not "any command", not a string
+that happens to start with one of them.
+
+**An unknown option key is refused, not ignored.** Ignoring it would run a
+different command than the caller asked for and report success. Each of the
+four keys has its own shape: a positive line count within 1000, one of three
+metrics, a non-empty pattern under 1 KiB, and a real boolean — `1` is not a
+boolean here.
+
+The same commit removed the **third** copy of the workspace error table, which
+`LocalWorkspaceModule.mm` carried after `LocalWorkspaceAccess.mm` and the core.
+It asks `workspace_error` now. An error that already carries a public code
+keeps it: it came from a layer that had already made the decision.
+
+### Which project failure JavaScript is told about
+
+`project_module.rs` ports `LPV2StableErrorCode`, `LPV2CanonicalOID`,
+`LPV2CanonicalOperationId`, `LPV2BoundedString` and `LPV2ClipUTF8` from
+`LocalProjectsModule.mm`, which had no core calls at all.
+
+**The stable code is the contract.** JavaScript branches on it, so the mapping
+from an internal failure in one of three domains to an `E_…` string is a rule
+both platforms answer alike. An unrecognised failure becomes
+`E_PROJECT_NATIVE`, not a guess: a caller must not be able to branch on a
+failure that does not exist.
+
+**The workspace half re-uses `workspace_error`** rather than keeping a second
+spelling of the same codes — they were two tables with the same contents, one
+edit from disagreeing. One deliberate difference remains and is tested: a busy
+picker is reported to a project operation as plain `E_WORKSPACE_BUSY`, because
+a project operation has nothing to say about the picker.
+
+`clip_utf8` backs off to a character boundary. Taking the byte bound literally
+would cut a multi-byte character in half and produce a string no consumer could
+read; the test checks the result is always a prefix of the input across every
+bound from 0 to 12.
+
+An **operation id** may be the nil UUID, unlike a snapshot id — it is the
+caller's to choose and nothing reads a sentinel out of it. The test asserts
+both, side by side, so the difference reads as intended rather than as an
+inconsistency.
+
+### How a context snapshot is named
+
+`project_context_service.rs` ports `DSHServiceV2ReferenceId`,
+`DSHServiceV2RootsEqual`, `DSHServiceV2BoundedString` and
+`DSHServiceCanonicalDigest`. The root reference rule is **not** re-stated: this
+file carried a second copy of the one `project_access` owns, and now asks for
+it.
+
+**The reference id is derived, not chosen.** `ProjectContextStore` names a
+prepare transaction by the suffix of an `active:<uuid>` key, so if that uuid
+were the conversation's, two workspaces using one conversation id could evict
+or authorise one another's snapshot. It is a digest over the whole authority
+tuple — root, root fingerprint, conversation — shaped into a UUID with the
+version and variant bits set, because the store checks it is a canonical id.
+
+**A round trip is not a parity test, and this is the proof.** While a core
+built with a changed derivation domain was staged, all 106
+`ProjectContextWorkspaceV2Tests` passed: a round trip writes and reads with
+whatever derivation it has, so self-consistency survives any change to it. Only
+an already-stored snapshot would notice — and there are none in a fresh test.
+
+`testReferenceIdMatchesTheOriginalDerivation` is the real check: the original
+ObjC algorithm, transcribed and running against Foundation and CommonCrypto as
+it did, against the core, over twelve tuples. It failed on all twelve against
+that mutated core, which is how it is known to be load-bearing rather than
+assumed.
+
+**And the reason that mutated core was still staged is worth recording too.**
+Restoring the Rust source is not enough: `prepare-rish-agent-core.sh` has to
+run again, or the linked xcframework is the old one. The first parity run
+reported a mismatch that did not exist. Same trap as a stale `.app`, one layer
+down.
+
+### What an interrupted context swap resolves to
+
+`project_context_store.rs` ports the store's naming rules and its recovery
+sweep from `ProjectContextStore.mm`.
+
+**A reference is a name pointing at a snapshot**, in three namespaces:
+`active:<conversation>` (what a conversation is using), `retry:<…>` (held so a
+retry can reuse it, and the **only** kind a caller may set), and
+`txn:prepare:<conversation>` (written before `active:` is swapped, holding the
+id to go back to). A caller that could write `active:` could point a
+conversation at a snapshot of its choosing.
+
+A `txn:prepare:` key still present at launch means the process died mid-swap.
+**The subtle case is `crash_before_swap`:** when `active:` still holds the id
+the transaction recorded, the swap never happened, so there is nothing to undo
+and the new snapshot is *not* collected. Undoing there would throw away the
+snapshot the conversation is actually using.
+
+The sentinel `00000000-…-000000000000` means "there was no prior snapshot". It
+is deliberately not a valid snapshot id: rolling back to it would point a
+conversation at something that never existed.
+
+**Three checks inside the loop are redundant with the sweep that follows**, and
+the mutation test says so rather than leaving them looking proven: refusing to
+roll back to the sentinel, refusing to roll back to an id that is gone, and
+removing the transaction key. In each case the sweep drops the same key a
+moment later, so no input the host can produce tells them apart. They stay
+because they mirror the original line for line and because the sweep is a
+separate rule that could change — `the_sweep_is_what_actually_drops_them` pins
+why, so anyone loosening the sweep knows those three stop being redundant.
+
+### Where the app's own container ends
+
+`container_anchor.rs` ports `DSHIsCanonicalUUIDText`,
+`DSHComponentsEndWithAppContainer`, `DSHLastAppContainerComponentIndex`,
+`DSHComponentsContainTraversal`, `DSHContainerAnchorSegmentCountForPaths` and
+`DSHContainerRootScanSegmentCount`.
+
+**This rule exists because guessing path shape got it wrong on real devices.**
+The walker used to scan for an `Application` component followed by
+`Application Support`, which never matches
+`/private/var/mobile/Containers/Data/Application/<UUID>/…`, so it fell back to
+opening `/private/var` — which the sandbox refuses with EPERM. The anchor is
+derived from the container root instead.
+
+**The innermost `Containers/Data/Application/<UUID>` wins.** A container root
+must also *end* at its own UUID: one carrying anything after it is not a
+container root, and anchoring there would let the caller choose where the walk
+starts. Traversal is refused at derivation time as well as during the walk, so
+an anchor is never derived from a traversal-shaped path.
+
+Splitting a path stays with the host: `pathComponents` is Foundation's and
+keeps a leading `"/"` a naive split would not.
+
+**A test whose name described something it did not test.** The first version of
+`the_innermost_container_wins` used the simulator layout — but the CoreSimulator
+device UUID there is not preceded by the container tail, so there is only *one*
+candidate and scanning from either end gives the same answer. Reversing the
+search left every test green. It now uses a path with two real container tails,
+and the mutation fails.
+
+**And one of the nine pre-existing iOS failures was a test defect, now fixed.**
+`ContainerAnchorTests testSimulatorShapePathAnchorsAtAppContainerRoot` asserted
+the literal index 12, derived from a shallower `NSHomeDirectory()` than this
+machine has; here the answer is 22. The expectation is computed from the
+container root now, which is what the anchor is supposed to make unnecessary.
+The baseline is eight failures, not nine.
+
+### What a project binding is
+
+`project_access.rs` is the first cut into the project subsystem, the peer of
+the workspace subsystem: a workspace is a folder someone granted, a project is
+a Git working tree inside one. It ports `DSHLocalProjectRootRefIsValid`,
+`DSHLocalProjectCanonicalRootRef`, `DSHLocalProjectBindingIsValid`,
+`DSHLocalProjectBindingDigest`, `DSHValidStoredMetadataRecord` and
+`DSHLocalProjectCanonicalLegacyDisplayName` from `LocalProjectAccess.mm`,
+which had no core calls at all.
+
+**A binding restates the root reference's identity and the root fingerprint.**
+That is its job: one found beside a project has to prove it was written for
+*this* root at *this* revision, or it is a binding for something else that
+happens to be in the way.
+
+**The git directory path is not in the binding's digest.** It is a local fact
+that differs between installs of the same project, and folding it in would make
+two devices disagree about a binding they agree about. It also cannot cross as
+an `NSURL`, so the host hands over its path and whether it was a file URL at
+all — a projection, like the others.
+
+Stored project metadata's timestamps are **bounded, not parsed**. The record
+predates the canonical timestamp rule, and refusing an old project over its
+date format would lose the project rather than fix the date. Said here so the
+looseness reads as a decision.
+
+**A projection that is not load-bearing, said out loud.** Foundation's
+`whitespaceAndNewlineCharacterSet` includes U+200B where Rust's `trim` does
+not, so the legacy display name's trimming is handed across. It changes nothing
+these tests can reach: U+200B is a format character, and
+`path_control_or_format` already refuses it — replacing the host's answer with
+`name.trim()` leaves every test green. The projection stays because
+Foundation's set cannot be enumerated from this side and being wrong about it
+would mean accepting a padded name the writing device refuses. A guard against
+an unknown, held deliberately rather than by accident.
+
+### What a destructive workspace operation needs before it runs
+
+`workspace_clearance.rs` ports `DSHWorkspaceClearanceCanonicalOperationFields`,
+`DSHWorkspaceClearanceReceiptFields` and
+`DSHWorkspaceClearanceSessionReferenceValid`.
+
+A clearance is the proof that a destructive operation — forget, or delete the
+owned content — was authorised against **a specific committed session**. That
+is why the receipt names the session's generation and digest: without them,
+"they said yes" could mean yes to a different state. `receipt_authorises` is
+new rather than ported; it states in one place what the store checked in
+several: the receipt id, the operation id, the workspace and the binding
+revision must all agree. A receipt for the right workspace at the wrong binding
+is consent for a root that has since been rebound.
+
+A session generation counts from one. Generation zero means no session has ever
+been committed, which nobody can have agreed to.
+
+**The clearance store's bounds are the workspace receipt store's bounds** —
+2048 receipts, thirty days — and they are now re-exported from
+`workspace_receipt` rather than written out again. They were already the same
+numbers in two files; two stores expiring on different schedules would have
+been a policy nobody decided on, one edit away.
+
+`WorkspaceClearanceStore.mm` also carried its own complete set of schema
+primitives (`ClearanceUUID`, `ClearanceDigest`, `ClearanceTimestamp`,
+`ClearanceExactKeys`, …) — a third copy after `LocalWorkspaceAccess.mm` and the
+core. The ones the ported rules used are gone; the rest still back the file's
+storage paths and stay for now.
+
+### Android reads its registry the way iOS does
+
+Two things, and the second only became possible because of the first.
+
+**One place says device ids are not durable.**
+`DSHWorkspaceDescriptorMatchesAuthority` — the last rule left in
+`LocalWorkspaceAccess.mm` — now asks `descriptor_matches_authority`. Only the
+inode is compared, because iOS renumbers the data volume across reboots and a
+persisted `st_dev` would fail a perfectly good root after a restart. What a
+matching device id used to stand for, "this is inside our own container", is
+carried by *how* the caller got the descriptor: it walked down from the app
+container. That reasoning used to be written out twice, here and in the legacy
+matcher. It is written once now.
+
+**Android's registry uses the shared rules it was written before.**
+`AndroidWorkspaceRegistry` was checking `schema_version`, `generation` and
+`records` by hand and parsing with `JSONObject` directly. It now runs the byte
+scanner before the parse and `registry_shape` after it, and asks
+`registry_has_room` before creating — a bound it did not have at all.
+
+**That change made ascending order a rule Android had to obey, and it did
+not.** `create` appended; the registry it wrote would have failed to load on
+the next launch. Caught while writing the change rather than by a test, but
+`recordsAreStoredInAscendingWorkspaceIdOrder` now pins it. The order matters
+for the reason given above: the registry's canonical JSON is what a journal's
+`previous_registry_sha256` is taken over.
+
+**`org.json` keeps the last of two duplicate keys, silently.**
+`aRegistryWithADuplicateKeyIsRefusedBeforeItIsParsed` appends a second
+`generation` to a real registry file and asserts two things: the scanner
+refuses the bytes, *and* `JSONObject` happily parses them and reports a
+generation nothing ever wrote. The second assertion is the one that says why
+the scan has to happen before the parse rather than after.
+
+The first version of that test put the duplicate first and expected it to win.
+It lost — the original came later in the text. The fixture was wrong, not the
+claim; it appends now.
+
+### Whether stored bytes are JSON worth looking at
+
+`workspace_json.rs` ports `DSHJSONHasBoundedExactStructure` and its scanner. It
+runs before the parse, on raw bytes that may be corrupt or hand-edited: one
+complete value, at most 64 levels and 100,000 nodes, no duplicate keys in any
+object however spelled, no negative zero, nothing after it. It is the reason a
+bad registry costs a refusal rather than an unbounded walk — and Android's
+registry, which currently just calls `JSONObject(text)`, can now have the same
+guard.
+
+**The core already had two scanners of this shape, and this is a third.**
+`strict_json` (tool arguments) and `session_schema::scanner` (the session
+snapshot) look almost identical. They are not interchangeable:
+
+| | top level | nodes | raw `0x7f` in a string |
+| --- | --- | --- | --- |
+| `strict_json` | object | 30,000 | refused |
+| `session_schema::scanner` | object | 250,000 | refused |
+| `workspace_json` | any value | 100,000 | **accepted** |
+
+The third column is the one that matters. Reusing either of the others would
+refuse a stored registry the current engine accepts. That file almost certainly
+does not exist — Foundation escapes control characters when it writes, and
+every string position refuses `0x7f` downstream anyway — but *almost certainly*
+is not *verified*, and this is the acceptance rule for data already on people's
+devices. A test asserts the difference rather than a comment claiming it.
+Unifying the three is a decision to take knowingly, not one that arrives by
+reuse.
+
+This reducer takes the **raw bytes** rather than a JSON envelope, because the
+question is about bytes that may not be JSON — there is nothing to put an
+envelope around.
+
+**One guard that is not load-bearing, said out loud.** The scanner's own
+`< 0x20` check mirrors the ObjC line for line, but removing it leaves every
+test green: serde refuses the same bytes when the token is decoded. The test
+now says so and asserts the redundancy, rather than looking like proof it is
+not.
+
+### Sealing an authority, and the registry file itself
+
+Two duplications closed.
+
+**Sealing.** `workspace_fingerprint::seal` is the writing side of
+`fingerprint_valid`: build the input, hash it, one step. The host used to do
+that in three — `DSHAuthorityDigestWithoutFingerprint`, one of three
+`*FingerprintInput` builders, `DSHWorkspaceRootFingerprintSHA256` — at each
+creation site, which is the same rule written twice. All four helpers are gone
+from `LocalWorkspaceAccess.mm`; `workspace_authority`'s own upgrade path uses
+`seal` too, so an upgrade and a fresh write cannot seal differently.
+`DSHWorkspaceRootFingerprintSHA256` stays in `DSHWorkspaceCanonical.mm`, where
+`WorkspaceFingerprintParityTests` compares it against the core — that is the
+evidence the two agree, and deleting it would delete the evidence.
+
+**The registry file.** `registry_shape` now owns what `loadRegistry:` used to
+check inline. Three invariants beyond "every record is a record":
+
+- **Workspace ids are strictly ascending**, not merely unique. The registry's
+  canonical JSON is what `previous_registry_sha256` is taken over, so the same
+  records in a different order digest differently and every journal written
+  against one would be unrecoverable against the other.
+- **No two records share a folded directory name.** Two workspaces whose
+  folders differ only by case or accent are one folder on this filesystem, and
+  the second would silently write into the first.
+- **The count is bounded** at 1024, which now has one copy rather than two.
+
+The host folds each record's two names and hands them across in order; a short
+list is refused rather than judged halfway.
+
+**Asserting a constant proves nothing.** The first version of the capacity test
+said `assert_eq!(MAX_RECORDS, 1024)` and nothing else, and deleting the bound
+left it green. It now builds a registry of 1024 records and one of 1025.
+
+`layout_manifest_shape` moved with it.
+
+**What is deliberately *not* delegated:** the primitive predicates
+(`DSHCanonicalUUID`, `DSHCanonicalTimestamp` and friends) still used at the
+public API boundary, where they check a caller's arguments before anything is
+read or written. They run dozens of times per launch and the composite rules
+behind them all go through the core, so a duplicated primitive on an argument
+path is a much smaller risk than a duplicated *stored shape* was. Said plainly
+rather than quietly left.
+
+### Which failure a caller is told about
+
+`workspace_error.rs` ports `DSHWorkspacePublicCode` and
+`DSHWorkspacePublicMessage`. This is contract, not a lookup table two
+platforms may each keep a copy of: the public code is what the JS layer
+branches on and what a person's retry depends on. `E_WORKSPACE_CONFLICT` says
+"try again", `E_WORKSPACE_PERSISTENCE` says "this store cannot be read", and a
+caller that cannot tell them apart cannot behave correctly.
+
+The numbers 1..19 are on the wire, so the table is dense and unique and the
+test says so. A number the engine does not define projects to nothing — no code
+is invented for it, because a caller must not be able to branch on a failure
+that does not exist.
+
+The messages are the fixed English fallback the native layer attaches, not
+localisation: the product's translated strings are chosen in the UI from the
+code.
+
+### What the host found when it re-read a legacy project
+
+`legacy_evidence`, `capabilities_set` and `legacy_identity_matches_authority`
+join the legacy rules already in `workspace_authority.rs`.
+
+**Device ids are deliberately not compared.** iOS renumbers the data volume
+across reboots, so a persisted `st_dev` is not evidence about a directory —
+comparing it would fail a perfectly good legacy root after a restart. The three
+inodes, all reached from this app's own container, carry the identity.
+
+Evidence carries a capability **set**, where order does not matter; a stored
+authority carries the ordered list. They are two rules, and
+`evidence_capabilities_are_a_set_not_a_list` pins that one accepts what the
+other refuses.
+
+**An NSSet does not cross a JSON boundary.** The first delegation passed the
+evidence dictionary straight into the envelope, `NSJSONSerialization` refused
+to encode the `NSSet` under `capabilities`, the envelope never serialised, and
+every legacy root became `E_WORKSPACE_UNAVAILABLE` — 192 failures. The host now
+turns sets into arrays on the way out. Worth keeping: unlike the journal
+identity relation, this path is *thoroughly* covered, and the suite said so
+immediately.
+
+### What an operation journal is, and how recovery reads it
+
+`workspace_journal.rs` ports `validJournal:`, `validLegacyJournal:`,
+`DSHCreateRequestSHA256`, `DSHBootstrapRequestSHA256`,
+`DSHJournalIdentityPresent`, `DSHJournalIdentityMatchesState` and
+`DSHOwnedAuthorityMatchesJournal`.
+
+A journal is what makes a workspace operation recoverable: written before the
+directory moves, updated as each phase lands, read on the next launch to decide
+whether an interrupted operation should be finished or undone. Three rules
+follow.
+
+- **A journal binds itself to its own request.** `request_sha256` must be the
+  digest of the request the journal claims to be carrying out, so a journal
+  cannot be replayed as a different operation than the one that was asked for.
+- **A phase says which digests exist yet.** `prepared` has neither an authority
+  nor a record digest; any later phase has both. A journal claiming one at
+  `prepared` describes a state that cannot have occurred.
+- **Physical identity is recorded in fours.** Device, inode, uid and gid are
+  present together or not at all. Three of four is not partial evidence — it is
+  a journal no recovery engine can check against a directory.
+
+Statting stays with the host, which passes the four numbers as the same
+canonical decimal strings the journal holds. That comparison is exact rather
+than a shortcut: a canonical unsigned string and the number it denotes are in
+bijection, which is what makes insisting on the canonical spelling worth
+anything.
+
+**A coverage hole this cut found.** After delegating, making
+`DSHJournalIdentityMatchesState` return `YES` unconditionally left all 68
+`LocalWorkspaceAccessTests` green — the relation that decides whether a
+journal's recorded directory is the one on disk was never exercised
+negatively, on either side of the migration.
+`testRecoveryRefusesAJournalWhoseIdentityIsNotTheDirectoryOnDisk` closes it:
+it interrupts a create, edits the recorded inode, and asserts recovery refuses
+with `E_WORKSPACE_CONFLICT` and leaves both the folder and the journal alone.
+With that test present the same mutation fails.
+
+One behaviour named rather than tightened: an identity-less authority and an
+identity-less journal do "match", because `[NSNull isEqual:NSNull]` is `YES`
+and the port reproduces it. It is unreachable — `owned_authority` requires
+canonical unsigned strings before anything gets that far — and tightening it
+would be a second reading of one rule on one platform.
+
+### What a workspace operation receipt is
+
+`workspace_receipt.rs` ports `validReceipt:`, `validLegacyReceipt:`,
+`DSHPublicOperationReceipt`, the store checks in `loadReceipts:`, the capacity
+check and the expiry test in `pruneReceipts:`.
+
+A receipt is how a retried operation is recognised as the one that already
+happened. Two things follow:
+
+- **One operation id names one outcome.** A store holding the id twice cannot
+  say which retry is the one that happened, so the store is refused whole
+  rather than read past the duplicate.
+- **`request_sha256` is an idempotency secret.** It binds the receipt to the
+  request that produced it, so the public projection leaves it out — handing it
+  over would let a caller claim recognition of an operation it never made. The
+  projection enumerates its keys rather than copying them.
+
+Two closed relations worth naming: only `delete_owned` can be `purge_pending`,
+because only a delete leaves content behind to purge; and `bootstrap_legacy`
+can only have committed, at revision 1, because bootstrapping is what *creates*
+the binding — a bootstrap receipt at revision 2 would claim the binding existed
+before it was made.
+
+A1 receipts predate `request_sha256` and stay readable. They are not rewritten
+in place: the record and the authority are what a retry is validated against,
+so nothing is gained by inventing a digest for a request nobody kept. The two
+shapes are each exact, so a new receipt cannot pass as an old one either.
+
+The timestamp stays with the host — the calendar is Foundation's — and the host
+passes the age it measured. A receipt whose timestamp will not parse counts as
+expired: it can never be matched against a retry, so keeping it is pure cost.
+The capacity moved too, so 2048 has one copy rather than two.
+
+`testAReceiptStoreWithARepeatedOperationIdIsRefused` is new; the duplicate case
+had no coverage. The public projection's withholding was already covered by two
+existing query tests.
+
+### Upgrading an authority written before fingerprints
+
+The three `DSHMigrate*Authority` functions, `DSHValidLegacyPhysicalIdentity`
+and the capability ordering now live in `workspace_authority.rs` beside the
+validators they mirror. `DSHCapabilityOrder` is gone: the one order a stored
+capability list may be spelled in has a single copy, in the core.
+
+**Upgrading is sealing.** The same contents, with the fingerprint they imply.
+Nothing is rewritten, so an upgrade can never turn an authority into a claim
+over something its own bytes did not already say. An authority that already
+carries a fingerprint is refused — the shape is exact — so a *broken* seal can
+never be repaired into a working one.
+
+Three asymmetries between migrating and validating, all the original's and all
+left alone rather than tidied:
+
+- The legacy migration requires the physical identity's metadata digest to be
+  the authority's own `root_identity_sha256`. The validator never compares
+  those two, so a stored legacy authority may carry different ones. Migration
+  is the narrower gate on purpose: it is the step that decides what a root is
+  worth *from evidence*, rather than reading back what someone already wrote.
+- The legacy migration checks `created_at` and `last_opened_at` are canonical
+  timestamps but not that they match the record's; the validator demands they
+  match. So a drifted legacy authority upgrades into one that still fails to
+  validate. The upgrade never invents agreement it did not find.
+- The legacy fingerprint folds in **no** authority digest, which is why the
+  caller can add the capability list after the seal and the seal still holds.
+  That is load-bearing and also the honest limit of a legacy fingerprint: it
+  covers the identity, not the whole object.
+
+**The suite covered none of this before.** Nothing on iOS wrote a
+pre-fingerprint authority, so the migration rules could have been anything.
+`testAnAuthorityWrittenBeforeFingerprintsIsUpgradedInPlace` writes one and
+checks it comes back sealed to exactly the fingerprint it had; it was verified
+by making `DSHMigrateOwnedAuthority` return nil, which fails it.
+
+`testAnIncompleteAuthorityIsNotUpgraded` was wrong on the first attempt: it
+expected the listing to report that one workspace as unavailable. It does not —
+it fails **closed** with `E_WORKSPACE_PERSISTENCE`. Storage that cannot be read
+as itself is not one workspace in a bad state; it is storage that cannot be
+trusted to describe any of them. Measured, then asserted.
+
+### What a workspace's directory is called
+
+`workspace_directory_name.rs` ports `DSHInternalComponent`,
+`DSHTruncateDisplayNameForSuffix` and the naming half of
+`allocateOwnedDirectoryNameForDisplayName:`.
+
+**The loop stays with the host, the names do not.** Deciding whether a
+candidate is taken needs folding, and folding is host-specific — Foundation
+folds case and diacritics together under `en_US_POSIX`, a JVM host does
+neither the same way. So the host walks ordinals and asks the core what each
+ordinal is called. What each one *is* called is the rule.
+
+**Truncation is a projection.** Foundation cuts on composed character
+sequences. Cutting anywhere else writes a character nobody typed: a name of
+fifteen 🇯🇵 flags is exactly 120 bytes, and making room for `" (1)"` on a byte
+or scalar boundary would leave a lone regional indicator on the end. The host
+supplies the clusters; the core decides where the cut falls, and a cluster goes
+in whole or not at all.
+
+`testOccupiedDisplayNameAtTheBoundIsTruncatedOnAClusterBoundary` pins that
+against Foundation, and it was checked by making the host pass UTF-16 units
+instead of clusters — it fails.
+
+`NAME_MAX` is 255 on both Darwin and Linux, so that bound is in the core rather
+than handed across.
+
+### What a stored authority looks like
+
+`workspace_authority.rs` is the fourth workspace rule, and the one that ties
+the other three together. Four shapes — owned, bookmark, granted, legacy — each
+restating its record's identity and each ending in the fingerprint from
+`workspace_fingerprint`.
+
+**The cross-check is the point.** An authority that is well formed but names a
+different workspace, a different binding revision or (for a legacy root) a
+different display name than the record it was loaded for is not that record's
+authority. The owned shape goes further: its directory digest must be the
+digest of the directory the *record* names, so an authority cannot claim a
+folder the registry never bound. The granted shape carries the bookmark's
+digest rather than the bookmark, and it must be the digest the bookmark
+authority recorded — the two are halves of one grant.
+
+**Base64 stays with the host.** The core has no base64, and decoding is
+mechanical. The host decodes and passes the decoded length and SHA-256; the
+rules — that the bytes fit the 256 KiB cap and that the claimed digest is the
+digest of what decoded — travel. Bytes that did not decode are reported as
+*absent*, never as zero bytes, so a broken string cannot read as an empty
+bookmark.
+
+Two Foundation notes:
+
+- `isEqual:` compares two `NSNumber`s by value, so a binding revision written
+  `3.0` still names binding 3. `same_value` reproduces that. The other
+  `NSNumber` coincidence — `@YES` equalling `@1` — is deliberately *not*
+  reproduced: nothing writes a boolean revision, and carrying that accident
+  into the rule would widen it.
+- Device and inode identifiers are canonical unsigned integer strings. They are
+  tested against the rule directly rather than through a sealed authority: a
+  non-canonical identifier also breaks the fingerprint input, so composing the
+  two would not show which check did the work. **A test that two guards both
+  reject something proves neither of them.**
+
+The legacy shape's six device/inode fields are *positive*, not merely unsigned:
+zero names nothing, and a legacy root reporting it is not verifiable.
+
+### What a stored workspace record may do
+
+`workspace_grants.rs` is the second workspace rule to move, and with
+`root_projection::capabilities_for_grants` it completes the chain from a stored
+record to what an agent may do with it: **locator kind → grants → Agent
+capabilities**.
+
+- a **documents-owned** root is produced and verified natively, so it grants
+  read, write, git and project context;
+- a **granted folder** grants read and write only. It has no native coordinated
+  Git, project-context or Files producer, and the advertised contract stays
+  honest until those consumers exist;
+- a **legacy** root grants what the host could verify. Verification means
+  re-reading the project metadata and comparing physical identity, which only
+  the host can do, so the answer is handed across rather than guessed at —
+  "could not verify" and "verified as nothing" both end in no grants, but they
+  are not the same thing;
+- nothing is granted unless the status is exactly `ok`.
+
+Deriving the status stays with the host: it resolves a security-scoped
+bookmark, starts a scope and stats a directory. What a status *means* travels.
+
+`files_visible` is in the projection but is not a grant — it says the folder
+shows up in Files, so it is true for a documents-owned root even when that root
+is unavailable, and a capability list can never turn it on.
+
+### The workspace root fingerprint
+
+This is the first rule of the workspace subsystem to move, and it moves first
+on purpose. The root fingerprint is what an Agent root projection carries and
+what a lease proves, so **two implementations would mean an authority written
+on one platform is invalid on the other**. Building Android's workspace
+subsystem against a second Kotlin copy of this would have been the exact thing
+the shared core exists to prevent — so the rule goes to the core before the
+Android host code that will need it exists.
+
+`workspace_fingerprint.rs` owns the three shapes and the digest:
+
+- `rish_created` / `imported` → a directory this app owns: device, inode, and
+  the digest of its name;
+- `granted_folder` → a folder the person granted: volume and resource
+  identifiers plus the security-scoped bookmark;
+- `legacy_app_owned` → the pre-workspace layout: three separate device/inode
+  pairs.
+
+The first two fold in `authority_sha256`, the digest of the authority record
+*without* its own fingerprint, so the fingerprint covers everything the record
+says about itself and cannot be carried to a record that says something else.
+That digest is a **plain** SHA-256 over canonical JSON, not domain-separated,
+because that is what the stored records were written with.
+
+Device and inode numbers travel as strings in their shortest decimal spelling:
+they outrun a safe integer on some filesystems, and two spellings of one number
+would be two roots.
+
+**Verified by real parity, not by a replica agreeing with itself.** Both
+implementations are still present, so `WorkspaceFingerprintParityTests` puts
+the same inputs through `DSHWorkspaceRootFingerprintSHA256` and through the
+core and asserts the digests are equal — for all three origins — and that both
+refuse the same nine malformed inputs.
+
+### Android serves its first agent operation
+
+`AgentRuntime.prepare_agent_attempt` is no longer a rejection on Android. It
+reads the committed session and writes the agent WAL through the shared core,
+exactly as iOS does.
+
+Every attempt there is **rootless**, because Android resolves no workspace
+root, so the core commits it as `not_agent` / `E_AGENT_NO_ROOT`. That is a
+definite answer — "this attempt gets no agent authority" — and it is a
+different thing from `E_AGENT_NATIVE`, which says "there is no agent engine
+here". The controller can treat an Android chat as an attempt without tools
+rather than as a platform without an engine.
+
+`implemented` stays `false`. The JS layer reads that constant as "the whole
+agent surface is available", and one served operation is not that. The rest of
+the surface still rejects.
 
 ### The cross-store seam, and what covers it
 
@@ -1256,6 +2082,32 @@ place once and read it back before refusing, the way `LocalWorkspaceAccess`
 migrates a legacy `NSFileProtectionComplete` item. Without that repair an
 upgraded container fails every WAL read with `E_AGENT_PERSISTENCE` and never
 recovers, which the simulator can never show.
+
+### Editing Objective-C by pattern
+
+Two mistakes in this program came from replacing text between two markers found
+by a plain search:
+
+- the first occurrence of a selector is often its **declaration** in a class
+  extension, not its implementation. Anchor the search after
+  `@implementation <Class>`.
+- the *end* marker must be searched for **after the start index**. Searching
+  the whole file can return a declaration that sits earlier, which makes the
+  end precede the start and silently duplicates everything between them. That
+  produced "duplicate interface definition" errors a hundred lines away from
+  the actual edit.
+
+### Checking an Xcode build result
+
+`grep "error:"` over `xcodebuild` output is not a build check. Objective-C
+selector fragments such as `error:(NSError **)error` contain that substring, so
+a build full of deprecation context matches it dozens of times, and a `head -N`
+after the grep then hides the one line that mattered. A failing build read this
+way looks clean, and the stale `.app` left behind fails to launch with
+`Launchd job spawn failed` — which reads like a wedged simulator and is not.
+
+Check the outcome, not the noise: `xcodebuild … | tail -3` and look for
+`** TEST BUILD SUCCEEDED **`, or grep `"^\*\* "`.
 
 ## Quality gates
 
