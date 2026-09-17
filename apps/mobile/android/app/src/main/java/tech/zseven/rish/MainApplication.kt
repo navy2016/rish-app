@@ -15,9 +15,8 @@ class MainApplication : Application(), ReactApplication {
       useDevSupport = BuildConfig.DEBUG && !BuildConfig.RISH_STANDALONE,
       packageList =
         PackageList(this).packages.apply {
-          // Task alerts, the workspace/file bridge and the mirror overlay have
-          // native implementations. The remaining runtime modules still reject
-          // unavailable capabilities explicitly.
+          // Task alerts have a native implementation. Runtime/workspace
+          // modules still reject unavailable capabilities explicitly.
           add(tech.zseven.rish.RishNativePackage())
         },
     )

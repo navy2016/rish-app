@@ -1,7 +1,7 @@
 package tech.zseven.rish.guest
 
 /**
- * JNI binding for the rish guest session ABI (see src/main/cpp/rish/rish_guest_jni.cpp).
+ * JNI binding for the rish guest session ABI (see src/main/cpp/rish_guest_jni.cpp).
  *
  * The runtime library is only present in builds that staged it through
  * scripts/prepare-rish-android.sh. [available] answers whether both native

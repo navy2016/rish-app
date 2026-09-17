@@ -22,6 +22,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Apply fork overlay
+        working-directory: .
+        run: sh .github/scripts/apply-fork-overlay.sh
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:

@@ -735,7 +735,7 @@ would accept or replay the same way.
 
 `scripts/prepare-rish-agent-core-android.sh` now builds the same core for
 `aarch64-linux-android` and stages it beside the guest runtime, and
-`src/main/cpp/rish/rish_agent_core_jni.cpp` exposes the session reducer over JNI.
+`src/main/cpp/rish_agent_core_jni.cpp` exposes the session reducer over JNI.
 `AndroidSessionStore` keeps SQLite as the storage mechanism and nothing else:
 the request shape, the candidate's acceptance and digest, the replay and
 expected-authority checks, and what a query may conclude all come from the

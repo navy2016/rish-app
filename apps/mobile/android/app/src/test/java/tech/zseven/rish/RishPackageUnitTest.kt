@@ -5,11 +5,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pins which Android bridges are real implementations and which still fail
- * closed with a JS-recognized unavailable code.
- *
- * LocalMirrors, LocalWorkspace and LocalWorkspaces are implemented by the
- * Android workspace/mirror modules; the remaining names reject explicitly.
+ * Pins the remaining unsupported Android module names and their
+ * JS-recognized unavailable codes. Runtime and snapshots have device tests.
  * LocalGuest is implemented (tech.zseven.rish.guest) but still rejects with
  * E_GUEST_NATIVE in a lite build without the staged rish runtime.
  *
@@ -18,15 +15,16 @@ import org.junit.Test
  */
 class RishPackageUnitTest {
 
-    private val implemented = setOf("LocalMirrors", "LocalWorkspace", "LocalWorkspaces")
-
     private val unavailableCodes = mapOf(
         "AgentRuntime" to "E_AGENT_NATIVE",
         "LocalAttachments" to "E_NATIVE_UNAVAILABLE",
         "LocalDocuments" to "E_NATIVE_UNAVAILABLE",
         "LocalGuest" to "E_GUEST_NATIVE",
+        "LocalMirrors" to "E_NATIVE_UNAVAILABLE",
         "LocalProjectContext" to "E_CONTEXT_NATIVE",
         "LocalProjects" to "E_PROJECT_NATIVE",
+        "LocalWorkspace" to "E_WORKSPACE_UNAVAILABLE",
+        "LocalWorkspaces" to "E_WORKSPACE_UNAVAILABLE",
     )
 
     @Test
@@ -37,7 +35,7 @@ class RishPackageUnitTest {
                 "LocalMirrors", "LocalProjectContext", "LocalProjects",
                 "LocalWorkspace", "LocalWorkspaces",
             ),
-            implemented + unavailableCodes.keys,
+            unavailableCodes.keys,
         )
     }
 

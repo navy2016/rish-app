@@ -1,0 +1,34 @@
+diff --git a/apps/mobile/android/app/build.gradle b/apps/mobile/android/app/build.gradle
+index e17629e..3e686fc 100644
+--- a/apps/mobile/android/app/build.gradle
++++ b/apps/mobile/android/app/build.gradle
+@@ -180,25 +180,24 @@ android {
+     if (rishGuestEnabled || rishAgentCoreEnabled) {
+         externalNativeBuild {
+             cmake {
+-                path file("src/main/cpp/CMakeLists.txt")
++                path file("src/main/cpp/fork/CMakeLists.txt")
+                 version "3.22.1"
+             }
+         }
+         def cmakeArguments = ["-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"]
+-        def cmakeTargets = []
+         if (rishGuestEnabled) {
+             cmakeArguments += "-DRISH_FFI_DIR=${rishFfiDir.absolutePath}".toString()
+-            cmakeTargets += "rish_guest_jni"
+         }
+         if (rishAgentCoreEnabled) {
+             cmakeArguments += "-DRISH_AGENT_CORE_DIR=${rishAgentCoreDir.absolutePath}".toString()
+-            cmakeTargets += "rish_agent_core_jni"
+         }
+         defaultConfig {
+             externalNativeBuild {
+                 cmake {
++                    // No targets filter: the app-level build must also produce
++                    // the framework's libappmodules.so (OnLoad.cpp), not just
++                    // the two rish JNI shims.
+                     arguments(*cmakeArguments)
+-                    targets(*cmakeTargets)
+                 }
+             }
+         }
