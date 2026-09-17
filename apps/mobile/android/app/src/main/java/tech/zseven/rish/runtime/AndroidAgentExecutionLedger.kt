@@ -224,6 +224,124 @@ internal class AndroidAgentExecutionLedger(
             cas.optJSONObject("locator")?.opt("task_id"),
             cas.optJSONObject("locator")?.opt("attempt_id"), null, null, false)
 
+    /**
+     * Writes a prepared tool batch and the ledger rows it implies, through
+     * `rish_agent_ledger_batch_reduce`.
+     *
+     * The view is the whole attempt as the reducer needs to see it: the frozen
+     * round, the attempt's batches and reservation, the transcript the request
+     * names, the attempt's ledger rows and dispatch markers, the round's denied
+     * calls, the authorities and the operation results. It is collected here
+     * because reading the WAL is the host's job, and every decision over it is
+     * the reducer's.
+     *
+     * `approvalTokens` are host-generated because the reducer has no
+     * randomness. One per call that may need approval; the reducer takes what
+     * it needs and ignores the rest.
+     */
+    fun prepareToolBatch(
+        request: JSONObject,
+        approvalTokens: List<String>,
+    ): JSONObject? {
+        var output: JSONObject? = null
+        val taskId = request.opt("task_id")
+        val attemptId = request.opt("attempt_id")
+        val roundId = request.opt("round_id")
+        val body: (JSONObject) -> Boolean = body@ { state ->
+            val ledgerRows = JSONArray()
+            state.optJSONArray("ledger")?.let { rows ->
+                for (index in 0 until rows.length()) {
+                    val row = rows.optJSONObject(index) ?: continue
+                    if (AndroidJson.equal(row.optJSONObject("locator")?.opt("attempt_id"), attemptId)) {
+                        ledgerRows.put(row)
+                    }
+                }
+            }
+            val dispatch = JSONArray()
+            state.optJSONArray("dispatch")?.let { markers ->
+                for (index in 0 until markers.length()) {
+                    val marker = markers.optJSONObject(index) ?: continue
+                    if (marker.optString("kind") == "execution" &&
+                        AndroidJson.equal(marker.optJSONObject("locator")?.opt("attempt_id"), attemptId)) {
+                        dispatch.put(marker)
+                    }
+                }
+            }
+            val rounds = JSONArray()
+            state.optJSONArray("rounds")?.let { table ->
+                for (index in 0 until table.length()) {
+                    val round = table.optJSONObject(index) ?: continue
+                    if (AndroidJson.equal(round.opt("round_id"), roundId)) rounds.put(round)
+                }
+            }
+            val transcripts = state.optJSONArray("transcripts")
+            val transcriptIndex = transcriptIndex(
+                transcripts, request.optJSONObject("transcript")?.opt("transcript_ref"),
+            )
+            val authorityTable = state.optJSONArray("authorities")
+            val authorities: Any = if (authorityTable == null) JSONObject.NULL else slotted(authorityTable) {
+                AndroidJson.equal(it.opt("task_id"), taskId) &&
+                    AndroidJson.equal(it.opt("attempt_id"), attemptId)
+            }
+            val operationResults = JSONArray()
+            state.optJSONArray("operation_results")?.let { table ->
+                for (index in 0 until table.length()) {
+                    val record = table.optJSONObject(index) ?: continue
+                    if (AndroidJson.equal(record.opt("task_id"), taskId) &&
+                        AndroidJson.equal(record.opt("attempt_id"), attemptId)) {
+                        operationResults.put(record)
+                    }
+                }
+            }
+            val view = JSONObject()
+                .put("tables_present", true)
+                .put("rounds", rounds)
+                .put("batches", slotted(state.optJSONArray("batches")) {
+                    AndroidJson.equal(it.opt("attempt_id"), attemptId)
+                })
+                .put("reservations", slotted(state.optJSONArray("reservations")) {
+                    AndroidJson.equal(it.opt("task_id"), taskId) &&
+                        AndroidJson.equal(it.opt("attempt_id"), attemptId)
+                })
+                .put(
+                    "transcript",
+                    if (transcriptIndex < 0) JSONObject.NULL
+                    else transcripts?.optJSONObject(transcriptIndex) ?: JSONObject.NULL,
+                )
+                .put("transcript_summaries", JSONArray())
+                .put("ledger_rows", ledgerRows)
+                .put("dispatch", dispatch)
+                .put("denied_calls", JSONArray())
+                .put("denied_attempt_count", 0)
+                .put("denied_total_count", 0)
+                .put("authorities", authorities)
+                .put("authorities_present", authorityTable != null)
+                .put("operations_present", state.optJSONArray("operation_results") != null)
+                .put("operation_results", operationResults)
+            val env = JSONObject()
+                .put("launch_id", AndroidAgentWal.launchId)
+                .put("now", RuntimeJson.now())
+                .put("approval_tokens", JSONArray(approvalTokens))
+            val reply = try {
+                reduce(
+                    JSONObject().put("op", "prepare_tool_batch").put("request", request)
+                        .put("env", env).put("view", view),
+                )
+            } catch (_: Refused) {
+                return@body false
+            }
+            // The reducer returns changes and an output; the facade applies
+            // the changes to the state the WAL transaction will commit. A
+            // batch insert names no existing row, so there is no slot to
+            // replace and the row index is deliberately absent.
+            apply(state, reply.optJSONArray("changes") ?: JSONArray(), -1)
+            output = reply.optJSONObject("output") ?: reply
+            true
+        }
+        wal.transaction(body)
+        return output
+    }
+
     fun query(locator: JSONObject, expectedTranscript: JSONObject?, root: JSONObject?): JSONObject? =
         run("query", JSONObject().put("locator", locator)
             .put("expected_transcript", expectedTranscript ?: JSONObject.NULL)

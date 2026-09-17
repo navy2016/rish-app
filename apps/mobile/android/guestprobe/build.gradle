@@ -43,7 +43,7 @@ android {
             cmake {
                 arguments "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
                           "-DRISH_FFI_DIR=${rishFfiDir.absolutePath}".toString()
-                targets "rish_guest_jni"
+                targets "rish_guest_jni", "guestprobe_jni"
             }
         }
     }

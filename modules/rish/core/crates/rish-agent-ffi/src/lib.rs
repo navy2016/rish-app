@@ -21,6 +21,7 @@ use rish_agent_core::provider_round::reduce_json as provider_round_reduce_json;
 use rish_agent_core::root_projection::reduce_json as root_reduce_json;
 use rish_agent_core::round_journal::reduce_json;
 use rish_agent_core::runtime_coordinator::reduce_json as runtime_reduce_json;
+use rish_agent_core::runtime_environment::reduce_json as runtime_environment_reduce_json;
 use rish_agent_core::session_schema::reduce_json as session_reduce_json;
 use rish_agent_core::strict_json::parse_arguments;
 use rish_agent_core::tool_batch::reduce_json as tool_batch_reduce_json;
@@ -388,6 +389,27 @@ pub unsafe extern "C" fn rish_agent_git_tool_reduce(
         return std::ptr::null_mut();
     };
     output(git_tool_reduce_json(text))
+}
+
+/// Runs one runtime-environment decision over the JSON envelope documented on
+/// `rish_agent_core::runtime_environment::reduce_json` -- what an environment
+/// identity, a download URL and a package manifest have to be.
+///
+/// The URL arrives already parsed by the host: `NSURLComponents` is what
+/// decides today what counts as a host or a fragment, and this keeps that
+/// answer where it is rather than substituting another parser's.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_runtime_environment_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(runtime_environment_reduce_json(text))
 }
 
 /// Runs one project-module decision over the JSON envelope documented on

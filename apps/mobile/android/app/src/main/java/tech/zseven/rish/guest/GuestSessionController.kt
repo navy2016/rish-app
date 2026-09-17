@@ -23,8 +23,16 @@ object GuestErrorCodes {
 /** A fail-closed rejection carrying one of [GuestErrorCodes]. */
 class GuestRejection(val code: String, message: String) : Exception(message)
 
-/** Verified, path-addressable copies of the kernel and initramfs. */
-class StagedGuestAssets(val kernelPath: String, val initramfsPath: String)
+/**
+ * Verified, path-addressable copies of the kernel and initramfs, plus the
+ * throwaway root disk this app supplies rather than letting the runtime look
+ * for a temp directory it may not be allowed to write.
+ */
+class StagedGuestAssets(
+    val kernelPath: String,
+    val initramfsPath: String,
+    val scratchDiskPath: String,
+)
 
 /** Produces [StagedGuestAssets] or throws a [GuestRejection]. */
 interface GuestAssetProvider {
@@ -98,6 +106,9 @@ class GuestSessionController(
                 JSONObject()
                     .put("kernel_path", staged.kernelPath)
                     .put("initrd_path", staged.initramfsPath)
+                    // Naming a root disk keeps the runtime out of TMPDIR. See
+                    // GuestAssets.SCRATCH_DISK_NAME for what that cost.
+                    .put("root_disk_path", staged.scratchDiskPath)
                     // The session boot ignores the command field, but the Rust
                     // request struct requires it; an empty argv satisfies it.
                     .put("command", JSONArray())

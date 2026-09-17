@@ -61,12 +61,18 @@ new_sha = hashlib.sha256(updated).hexdigest()
 archive.write_bytes(updated)
 manifest.write_text(manifest.read_text().replace(old_sha, new_sha))
 module.write_text(module.read_text().replace(old_sha, new_sha))
-(assets / 'guest-agent-build.json').write_text(json.dumps({
+provenance_path = assets / 'guest-agent-build.json'
+# Only the facts this refresh establishes are rewritten. Everything else the
+# file records -- the agent's own source commit, the kernel module digests --
+# is provenance this script did not produce and must not drop.
+provenance = json.loads(provenance_path.read_text()) if provenance_path.exists() else {}
+provenance.update({
     'rish_commit': pin, 'rust_toolchain': '1.94',
     'target': 'x86_64-unknown-linux-musl',
-    'base_initramfs_sha256': (json.loads((assets / 'guest-agent-build.json').read_text()).get('base_initramfs_sha256', old_sha) if (assets / 'guest-agent-build.json').exists() else old_sha),
+    'base_initramfs_sha256': provenance.get('base_initramfs_sha256', old_sha),
     'agent_sha256': hashlib.sha256(agent).hexdigest(),
     'init_sha256': hashlib.sha256(init).hexdigest(),
     'initramfs_sha256': new_sha,
-}, indent=2) + '\n')
+})
+provenance_path.write_text(json.dumps(provenance, indent=2) + '\n')
 print(f'Updated guest agent; initramfs SHA-256: {new_sha}')

@@ -26,6 +26,23 @@ object GuestAssets {
 
     /** Directory under Context.filesDir where the verified copies live. */
     const val STAGING_DIRECTORY = "rish-guest"
+
+    /**
+     * A throwaway root disk this app supplies itself.
+     *
+     * An initramfs boot never reads a root disk, but VmConfig demands a path,
+     * and when the caller omits one the runtime makes a temporary file of its
+     * own. Rust's temp_dir() honours TMPDIR and otherwise falls back to /tmp.
+     * Stock Android sets TMPDIR to the app's cache directory, so that worked;
+     * inside the 卓易通 compatibility layer TMPDIR is unset, /tmp exists and is
+     * not writable by the app, and the boot was refused with EACCES in 37ms --
+     * before a byte of the guest was read, identically at every memory size.
+     * Naming the path here means the runtime never looks for a temp directory.
+     */
+    const val SCRATCH_DISK_NAME = "scratch-root.img"
+
+    /** What the runtime would have sized its own throwaway disk to. */
+    const val SCRATCH_DISK_BYTES = 64L * 1024 * 1024
 }
 
 /**
@@ -45,7 +62,29 @@ class AndroidGuestAssets(private val context: Context) : GuestAssetProvider {
         }
         val kernel = stageOne(directory, GuestAssets.KERNEL_NAME, GuestAssets.KERNEL_SHA256)
         val initramfs = stageOne(directory, GuestAssets.INITRAMFS_NAME, GuestAssets.INITRAMFS_SHA256)
-        return StagedGuestAssets(kernel.absolutePath, initramfs.absolutePath)
+        val scratch = stageScratchDisk(directory)
+        return StagedGuestAssets(kernel.absolutePath, initramfs.absolutePath, scratch.absolutePath)
+    }
+
+    /**
+     * A sparse file of the size the runtime would have made for itself. It is
+     * never read during an initramfs boot; only its path is required. Sizing
+     * it costs nothing until something writes, and a file already the right
+     * size is left alone so a boot does not rewrite it.
+     */
+    private fun stageScratchDisk(directory: File): File {
+        val target = File(directory, GuestAssets.SCRATCH_DISK_NAME)
+        if (target.isFile && target.length() == GuestAssets.SCRATCH_DISK_BYTES) return target
+        try {
+            java.io.RandomAccessFile(target, "rw").use { it.setLength(GuestAssets.SCRATCH_DISK_BYTES) }
+        } catch (_: IOException) {
+            target.delete()
+            throw GuestRejection(
+                GuestErrorCodes.ASSETS_MISSING,
+                "The guest scratch root disk could not be created.",
+            )
+        }
+        return target
     }
 
     private fun stageOne(directory: File, name: String, expectedSha256: String): File {

@@ -10,11 +10,9 @@
 
 typedef void (*DSHAuthOutputCallback)(void *context, const char *event,
                                       size_t length);
-#if DSH_HARNESS_AUTH_ENABLED
 extern "C" char *rish_vm_session_exec_stream_json(
     void *session, const char *input, size_t input_len, void *context,
     DSHAuthOutputCallback callback) __attribute__((weak_import));
-#endif
 NSString *const DSHHarnessAuthHarnessCodex = @"codex";
 NSString *const DSHHarnessAuthHarnessClaudeCode = @"claude-code";
 
@@ -37,11 +35,7 @@ static NSString *const DSHCodexOAuthTokenURL = @"https://auth.openai.com/oauth/t
 static NSString *const DSHCodexOAuthClientID = @"app_EMoamEEZ73f0CkXaXp7hrann";
 
 static BOOL DSHAuthStreamFFIAvailable(void) {
-#if DSH_HARNESS_AUTH_ENABLED
   return rish_vm_session_exec_stream_json != NULL;
-#else
-  return NO;
-#endif
 }
 
 static NSDictionary *DSHAuthRuntime(BOOL available, NSString *version,
@@ -360,14 +354,12 @@ static BOOL DSHAuthValidSessionId(id value) {
 - (void)completeCodexRefresh:(NSDictionary *)credential errorCode:(NSString *)errorCode;
 @end
 
-#if DSH_HARNESS_AUTH_ENABLED
 static void DSHAuthStreamEvent(void *context, const char *event,
                                size_t length) {
   if (context == NULL || event == NULL || length == 0 || length > 256 * 1024) return;
   DSHHarnessAuthService *service = (__bridge DSHHarnessAuthService *)context;
   [service receiveStreamEvent:event length:length];
 }
-#endif
 
 @implementation DSHHarnessAuthService
 
@@ -1192,7 +1184,6 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
   }
   char *raw = NULL;
   @synchronized (self) { self.streamGeneration = generation; }
-#if DSH_HARNESS_AUTH_ENABLED
   NSString *home = @"/tmp/rish-auth-home";
   NSArray *command = @[ @"sh", @"-lc",
     [NSString stringWithFormat:
@@ -1203,7 +1194,6 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
   raw = commandData == nil ? NULL : rish_vm_session_exec_stream_json(
       session, (const char *)commandData.bytes, commandData.length, (__bridge void *)self,
       DSHAuthStreamEvent);
-#endif
   NSDictionary *loginResponse = nil;
   if (raw != NULL) {
     NSString *text = [NSString stringWithUTF8String:raw];

@@ -248,7 +248,6 @@
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F1A400011AD99517003FC87E /* HarnessAuthServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = HarnessAuthServiceTests.mm; sourceTree = "<group>"; };
 		F2A1F0E39B54A7F9B1B123F6 /* TaskExperienceAcceptance.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = TaskExperienceAcceptance.swift; path = Rish/TaskExperienceAcceptance.swift; sourceTree = "<group>"; };
-		F2A400011AD99517003FC87E /* HarnessAuth */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Rish/HarnessAuth; sourceTree = "<group>"; };
 		F3A400011AD99517003FC87E /* RuntimeProofCredentialTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RuntimeProofCredentialTests.mm; sourceTree = "<group>"; };
 		F4A400011AD99517003FC87E /* AgentGuestCgiAdapterTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentGuestCgiAdapterTests.mm; sourceTree = "<group>"; };
 		F5A400011AD99517003FC87E /* RishGuestCgiHTTPTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RishGuestCgiHTTPTests.mm; sourceTree = "<group>"; };
@@ -410,7 +409,6 @@
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
 				D5E3000000000000000000A1 /* GuestAssets */,
-				F2A400011AD99517003FC87E /* HarnessAuth */,
 			);
 			name = Rish;
 			sourceTree = "<group>";
@@ -540,7 +538,6 @@
 				13B07F871A680F5B00A75B9A /* Sources */,
 				13B07F8C1A680F5B00A75B9A /* Frameworks */,
 				13B07F8E1A680F5B00A75B9A /* Resources */,
-				F2A400031AD99517003FC87E /* [Rish] Copy optional HarnessAuth assets */,
 				00DD1BFF1BD5951E006B06BC /* Bundle React Native code and images */,
 				00EEFC60759A1932668264C0 /* [CP] Embed Pods Frameworks */,
 				E235C05ADACE081382539298 /* [CP] Copy Pods Resources */,
@@ -781,23 +778,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Rish/Pods-Rish-resources.sh\"\n";
-			showEnvVarsInLog = 0;
-		};
-		F2A400031AD99517003FC87E /* [Rish] Copy optional HarnessAuth assets */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-				"$(SRCROOT)/Rish/HarnessAuth/HarnessAuthAssets.json",
-			);
-			name = "[Rish] Copy optional HarnessAuth assets";
-			outputPaths = (
-				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/HarnessAuth/HarnessAuthAssets.json",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "set -eu\nsource_dir=\"${SRCROOT}/Rish/HarnessAuth\"\ndestination_dir=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/HarnessAuth\"\nif [ \"${DSH_HARNESS_AUTH_ENABLED:-0}\" != \"1\" ]; then\n  /bin/rm -rf -- \"${destination_dir}\"\n  exit 0\nfi\n/usr/bin/ruby \"${SRCROOT}/../../../scripts/copy-ios-harness-auth.rb\" \"${source_dir}\" \"${destination_dir}\"\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -1045,7 +1025,6 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = NO;
 				"DEAD_CODE_STRIPPING[sdk=iphonesimulator*]" = NO;
-				DSH_HARNESS_AUTH_ENABLED = 0;
 				ENABLE_BITCODE = NO;
 				ENTITLEMENTS_ALLOWED = YES;
 				INFOPLIST_FILE = Rish/Info.plist;
@@ -1113,7 +1092,6 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = NO;
 				"DEAD_CODE_STRIPPING[sdk=iphonesimulator*]" = NO;
-				DSH_HARNESS_AUTH_ENABLED = 0;
 				ENTITLEMENTS_ALLOWED = YES;
 				INFOPLIST_FILE = Rish/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;

@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "rish_agent_core.h"
 
 NSErrorDomain const DSHRuntimeProgramErrorDomain = @"tech.zseven.rish.program";
 
@@ -33,6 +34,23 @@ BOOL DSHRuntimeProgramValidRoot(id root) {
     DSHAgentCanonicalUUID(root[@"workspace_id"]) &&
     DSHAgentSafeInteger(root[@"binding_revision"], 9007199254740991ULL, NO) &&
     (root[@"project_id"] == NSNull.null || DSHAgentCanonicalUUID(root[@"project_id"]));
+}
+
+BOOL DSHRuntimeProgramValidEnvironmentId(id value) {
+  NSDictionary *envelope = @{
+    @"op": @"valid_program_environment_id",
+    @"value": value == nil ? NSNull.null : value,
+  };
+  if (![NSJSONSerialization isValidJSONObject:envelope]) return NO;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0 error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_runtime_environment_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return NO;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0 error:nil];
+  return [reply isKindOfClass:NSDictionary.class] && [reply[@"ok"] isEqual:@YES]
+      && [reply[@"valid"] isEqual:@YES];
 }
 
 BOOL DSHRuntimeProgramValidPath(id value) {

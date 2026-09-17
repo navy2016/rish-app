@@ -152,6 +152,19 @@ char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 /// E_PROJECT_NATIVE rather than a guess.
 char *rish_agent_project_module_reduce(const char *json, size_t json_length);
 
+/// One runtime-environment decision over {"op",...}: valid_environment_id,
+/// valid_program_environment_id, valid_workspace_id, valid_https_url,
+/// validate_manifest. The host still creates directories, measures capacity,
+/// protects files, hashes and streams a package; what an identity or a
+/// manifest has to be is decided here.
+///
+/// The download URL arrives already parsed, as
+/// {"text","parsed","scheme","host","has_user","has_password","has_fragment"}:
+/// NSURLComponents is what decides today what counts as a host or a fragment,
+/// and substituting another parser would change which downloads are accepted
+/// without anything saying so. An absent component is null, never "".
+char *rish_agent_runtime_environment_reduce(const char *json, size_t json_length);
+
 /// One project-context-bridge decision over {"op",...}: safe_relative_path,
 /// bounded_string. A reported path stays inside the project: no leading slash,
 /// no backslash, no NUL, no control or format characters, and every component

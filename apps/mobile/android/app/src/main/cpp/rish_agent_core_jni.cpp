@@ -219,6 +219,196 @@ Java_tech_zseven_rish_runtime_RishAgentCoreNative_walOperationReduce(
   return TakeOwnedReply(env, rish_agent_wal_operation_reduce(utf8.data(), utf8.size()));
 }
 
+// SHA-256 over raw bytes with a tagged prefix. A write's precondition names
+// the path and the content by these digests, and a host that spelled them
+// itself would be inventing an identity two platforms have to agree on.
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_hashBytes(
+    JNIEnv *env, jclass, jstring tag, jbyteArray bytes) {
+  std::string tagUtf8;
+  if (tag == nullptr || !JStringToUtf8(env, tag, &tagUtf8)) return nullptr;
+  if (bytes == nullptr) return nullptr;
+  jsize length = env->GetArrayLength(bytes);
+  std::vector<uint8_t> buffer(static_cast<size_t>(length));
+  if (length > 0) {
+    env->GetByteArrayRegion(bytes, 0, length, reinterpret_cast<jbyte *>(buffer.data()));
+  }
+  return TakeOwnedReply(env, rish_agent_hash_bytes(
+      tagUtf8.data(), tagUtf8.size(), buffer.data(), buffer.size()));
+}
+
+/// The canonical form of tool arguments, when the strict parser accepts them.
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_parseArguments(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_parse_arguments(utf8.data(), utf8.size()));
+}
+
+// The rest of the core's decision surface. Android bound 29 of the 47 entry
+// points, and the eighteen below were the ones the agent path needed: a tool
+// batch, a tool execution, a ledger batch, a provider round, a policy. Each
+// missing one was found by walking into it, one layer at a time; binding the
+// surface once ends that.
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_completionResponseReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_completion_response_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_containerAnchorReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_container_anchor_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_gitToolReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_git_tool_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_ledgerBatchReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_ledger_batch_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_policyReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_policy_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_projectAccessReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_project_access_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_projectContextBridgeReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_project_context_bridge_reduce(utf8.data(), utf8.size()));
+}
+
+// This one carries a file's raw bytes beside the envelope: content_decision
+// reads them, and the other ops pass null rather than an empty buffer, because
+// "no content" and "an empty file" are different questions.
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_projectContextReduce(
+    JNIEnv *env, jclass, jstring request, jbyteArray content) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  if (content == nullptr) {
+    return TakeOwnedReply(env, rish_agent_project_context_reduce(
+        utf8.data(), utf8.size(), nullptr, 0));
+  }
+  jsize length = env->GetArrayLength(content);
+  std::vector<uint8_t> bytes(static_cast<size_t>(length));
+  if (length > 0) {
+    env->GetByteArrayRegion(content, 0, length, reinterpret_cast<jbyte *>(bytes.data()));
+  }
+  return TakeOwnedReply(env, rish_agent_project_context_reduce(
+      utf8.data(), utf8.size(), bytes.data(), bytes.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_projectContextServiceReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_project_context_service_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_projectContextStoreReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_project_context_store_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_projectModuleReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_project_module_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_providerRoundReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_provider_round_reduce(utf8.data(), utf8.size()));
+}
+
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_toolBatchReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_tool_batch_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_toolExecutionReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_tool_execution_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceClearanceReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_clearance_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceErrorReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_error_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceReadToolsReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_read_tools_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceToolReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_tool_reduce(utf8.data(), utf8.size()));
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_tech_zseven_rish_runtime_RishAgentCoreNative_runtimeReduce(
     JNIEnv *env, jclass, jstring request) {

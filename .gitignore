@@ -17,11 +17,5 @@ apps/mobile/android/rish-agent-core/
 
 # Optional phone-local official CLI auth assets are verified build inputs,
 # never source-controlled release artifacts. Keep the directory itself
-# available for the preparation script while excluding generated credentials
-# runtimes and their digest manifest.
-apps/mobile/ios/Rish/HarnessAuth/*
-!apps/mobile/ios/Rish/HarnessAuth/.gitkeep
-!apps/mobile/ios/Rish/HarnessAuth/HarnessAuthAssets.json
-
 # Rust workspace for the shared agent core
 modules/rish/core/target/

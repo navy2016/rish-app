@@ -5,14 +5,12 @@
 #import "rish.h"
 #include <sys/stat.h>
 
-#if DSH_HARNESS_AUTH_ENABLED
-// Root-owned ABI under construction; weak like the existing stream import so
-// this module stays loadable (and reports unavailable) when absent.
+// Weak like the existing stream import, so this module stays loadable and
+// reports unavailable when linked against a runtime that predates it.
 extern "C" char *rish_vm_session_control_json(void *session,
                                               const char *input,
                                               size_t input_len)
     __attribute__((weak_import));
-#endif
 
 static NSString *const DSHClaudeHarnessId = @"claude-code";
 static NSString *const DSHClaudeGuestBinary = @"/opt/harness/claude";
@@ -65,11 +63,7 @@ static NSString *const DSHClaudeErrorTextFailed =
     @"E_CLAUDE_OFFICIAL_TEXT_FAILED";
 
 static BOOL DSHClaudeControlFFIAvailable(void) {
-#if DSH_HARNESS_AUTH_ENABLED
   return rish_vm_session_control_json != NULL;
-#else
-  return NO;
-#endif
 }
 
 static BOOL DSHClaudeValidSessionId(id value) {
@@ -358,7 +352,6 @@ static BOOL DSHClaudeValidSessionId(id value) {
         reply = self.controlExchangeOverride(payload);
         return;
       }
-#if DSH_HARNESS_AUTH_ENABLED
       void *handle = NULL;
       @synchronized (self) { handle = self.vmHandle; }
       if (handle == NULL || rish_vm_session_control_json == NULL) return;
@@ -386,7 +379,6 @@ static BOOL DSHClaudeValidSessionId(id value) {
         NSString *failure = [reply[@"error"] description] ?: @"control exchange failed";
         [self recordDiagnostic:@"control_failed" details:@{@"reason": [failure substringToIndex:MIN(failure.length, 1500)]}];
       }
-#endif
     } @catch (NSException *) {
       reply = nil;
     }

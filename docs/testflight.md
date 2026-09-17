@@ -71,7 +71,6 @@ internal testing group. External testing may require Beta App Review.
 The workflow does not submit an App Store release or enable external testers.
 
 The base build uses the repository's default native runtime configuration.
-Optional device-only harness-auth assets are not included by this workflow.
 
 ## Local preview service
 

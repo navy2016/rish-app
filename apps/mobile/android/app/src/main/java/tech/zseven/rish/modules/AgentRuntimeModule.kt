@@ -8,6 +8,9 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
 import org.json.JSONObject
 import tech.zseven.rish.RishUnavailable
+import tech.zseven.rish.runtime.AndroidAgentProviderRoundService
+import tech.zseven.rish.runtime.AndroidAgentToolBatchService
+import tech.zseven.rish.runtime.AndroidAgentToolExecutionService
 import tech.zseven.rish.runtime.AndroidPreparedAttemptStore
 import tech.zseven.rish.runtime.AndroidRuntimeState
 import tech.zseven.rish.runtime.RuntimeJson
@@ -61,16 +64,83 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun complete_agent_round_v2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun complete_agent_round_v2(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (_: Exception) {
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent round request is invalid")
+            return
+        }
+        runtime.io.execute {
+            try {
+                val result = runtime.providerRound.completeRound(captured)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
+            } catch (refused: AndroidAgentProviderRoundService.Refused) {
+                promise.reject(refused.code, "Agent round could not be completed")
+            } catch (_: Exception) {
+                promise.reject("E_AGENT_NATIVE", "Agent round could not be completed")
+            }
+        }
+    }
 
     @ReactMethod
-    fun prepare_agent_tool_batch(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun prepare_agent_tool_batch(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (_: Exception) {
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent tool batch request is invalid")
+            return
+        }
+        runtime.io.execute {
+            try {
+                val result = runtime.toolBatch.prepare(captured)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
+            } catch (refused: AndroidAgentToolBatchService.Refused) {
+                promise.reject(refused.code, "Agent tool batch could not be prepared")
+            } catch (_: Exception) {
+                promise.reject("E_AGENT_NATIVE", "Agent tool batch could not be prepared")
+            }
+        }
+    }
 
     @ReactMethod
     fun bind_agent_approval(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
 
     @ReactMethod
-    fun execute_agent_tool(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun execute_agent_tool(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (_: Exception) {
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent tool request is invalid")
+            return
+        }
+        runtime.io.execute {
+            try {
+                val result = runtime.toolExecution.execute(captured)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
+            } catch (refused: AndroidAgentToolExecutionService.Refused) {
+                // The service's vocabulary is the controller's; a code it does
+                // not know would be worse than a stable one.
+                promise.reject(refused.code, "Agent tool could not be executed")
+            } catch (_: Exception) {
+                promise.reject("E_AGENT_NATIVE", "Agent tool could not be executed")
+            }
+        }
+    }
+
+    /**
+     * The thirteenth operation the JS surface requires, and the one Android
+     * never declared. Its absence alone kept `AgentRuntime.isAvailable()` false
+     * however much else was built: the wrapper checks that every operation is a
+     * function before it reads anything at all.
+     *
+     * Interrupting is not implemented, so it refuses. A method that exists and
+     * says no is what the shape check needs; a method that is missing makes the
+     * whole surface unavailable.
+     */
+    @ReactMethod
+    fun interrupt_agent_attempt(request: ReadableMap?, promise: Promise) =
+        RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
 
     @ReactMethod
     fun cancel_agent_attempt(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)

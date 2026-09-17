@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <zlib.h>
 #include <math.h>
+#include "rish_agent_core.h"
 
 NSString *const DSHRuntimeEnvironmentErrorDomain = @"DSHRuntimeEnvironmentError";
 static uint64_t const MaxPackageBytes = 768ULL * 1024 * 1024;
@@ -16,46 +17,73 @@ NSError *DSHEnvironmentError(NSString *code) {
                         userInfo:@{@"code":code, NSLocalizedDescriptionKey:code}];
 }
 
-static BOOL Match(id value, NSString *pattern, NSUInteger max) {
-  return [value isKindOfClass:NSString.class] && [value length] > 0 && [value length] <= max
-      && [value rangeOfString:pattern options:NSRegularExpressionSearch].location != NSNotFound;
+// What an environment identity, a download URL and a package manifest have to
+// be lives in the shared core (modules/rish/core,
+// `rish_agent_runtime_environment_reduce`). Everything below this block is
+// still the host's: directories, capacity, file protection, hashing, and
+// streaming one package into a disk.
+static BOOL DSHEnvironmentReduceValid(NSString *op, NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  // A value that cannot be JSON is not a valid anything, and saying so here
+  // keeps a refusal from turning into a crash inside NSJSONSerialization.
+  if (![NSJSONSerialization isValidJSONObject:envelope]) return NO;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0 error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_runtime_environment_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return NO;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0 error:nil];
+  if (![reply isKindOfClass:NSDictionary.class]) return NO;
+  return [reply[@"ok"] isEqual:@YES] && [reply[@"valid"] isEqual:@YES];
 }
-BOOL DSHEnvironmentValidId(id value) { return Match(value, @"^[a-z0-9][a-z0-9-]*$", 96); }
+
+// `value` is `id`, so nil has to become a JSON null rather than truncate the
+// dictionary literal and change which key the core is asked about.
+static id DSHEnvironmentJSONValue(id value) {
+  return value == nil ? NSNull.null : value;
+}
+
+BOOL DSHEnvironmentValidId(id value) {
+  return DSHEnvironmentReduceValid(@"valid_environment_id",
+                                   @{@"value": DSHEnvironmentJSONValue(value)});
+}
+
 BOOL DSHEnvironmentValidWorkspaceId(id value) {
-  return Match(value, @"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", 36)
-      && [[NSUUID alloc] initWithUUIDString:value] != nil;
+  return DSHEnvironmentReduceValid(@"valid_workspace_id",
+                                   @{@"value": DSHEnvironmentJSONValue(value)});
 }
+
 BOOL DSHEnvironmentValidHTTPSURL(id value) {
-  if (![value isKindOfClass:NSString.class] || [value length] > 4096
-      || [value rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound) return NO;
+  // NSURLComponents decides what counts as a host or a fragment here, and the
+  // core decides what those parts have to be. Projecting rather than moving
+  // the parse keeps the set of accepted downloads exactly where it was.
+  if (![value isKindOfClass:NSString.class]) {
+    return DSHEnvironmentReduceValid(@"valid_https_url",
+                                     @{@"value": DSHEnvironmentJSONValue(value)});
+  }
   NSURLComponents *parts = [NSURLComponents componentsWithString:value];
-  return [parts.scheme isEqual:@"https"] && parts.host.length > 0
-      && parts.user == nil && parts.password == nil && parts.fragment == nil;
+  NSDictionary *projection = @{
+    @"text": value,
+    @"parsed": parts == nil ? @NO : @YES,
+    @"scheme": parts.scheme ?: NSNull.null,
+    @"host": parts.host ?: NSNull.null,
+    @"has_user": parts.user == nil ? @NO : @YES,
+    @"has_password": parts.password == nil ? @NO : @YES,
+    @"has_fragment": parts.fragment == nil ? @NO : @YES,
+  };
+  return DSHEnvironmentReduceValid(@"valid_https_url", @{@"value": projection});
 }
-static BOOL Integer(id value, uint64_t min, uint64_t max) {
-  if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return NO;
-  double number = [value doubleValue];
-  return isfinite(number) && floor(number) == number && number >= min && number <= max;
-}
-static BOOL Text(id value, NSUInteger max) {
-  return [value isKindOfClass:NSString.class] && [value length] > 0 && [value length] <= max
-      && [value rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound;
-}
+
 BOOL DSHEnvironmentValidateManifest(id value, NSString *kernelSHA256) {
-  if (![value isKindOfClass:NSDictionary.class]) return NO;
-  NSSet *keys = [NSSet setWithArray:@[@"schema_version",@"environment_id",@"family",@"display_name",@"version",
-      @"architecture",@"kernel_sha256",@"disk_sha256",@"disk_bytes",@"minimum_memory_mib"]];
-  return [[NSSet setWithArray:[value allKeys]] isEqual:keys] && Integer(value[@"schema_version"], 1, 1)
-      && DSHEnvironmentValidId(value[@"environment_id"])
-      && [@[@"python",@"java",@"go",@"rust",@"bun",@"node"] containsObject:value[@"family"]]
-      && Text(value[@"display_name"], 80) && Text(value[@"version"], 64)
-      && [value[@"architecture"] isEqual:@"x86_64"]
-      && [value[@"kernel_sha256"] isEqual:kernelSHA256]
-      && Match(value[@"disk_sha256"], @"^[0-9a-f]{64}$", 64)
-      && Integer(value[@"disk_bytes"], 1024 * 1024, 4ULL * 1024 * 1024 * 1024)
-      && [value[@"disk_bytes"] unsignedLongLongValue] % 512 == 0
-      && Integer(value[@"minimum_memory_mib"], 256, 1024);
+  if (kernelSHA256 == nil) return NO;
+  return DSHEnvironmentReduceValid(@"validate_manifest", @{
+    @"value": DSHEnvironmentJSONValue(value),
+    @"kernel_sha256": kernelSHA256,
+  });
 }
+
 BOOL DSHEnvironmentEnsureDirectory(NSURL *url) {
   struct stat s = {};
   if (lstat(url.fileSystemRepresentation, &s) != 0) {

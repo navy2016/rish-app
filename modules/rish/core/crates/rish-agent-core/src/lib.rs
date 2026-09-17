@@ -32,6 +32,7 @@ pub mod provider_round;
 pub mod root_projection;
 pub mod round_journal;
 pub mod runtime_coordinator;
+pub mod runtime_environment;
 pub mod runtime_tools;
 pub mod schema;
 pub mod session_schema;

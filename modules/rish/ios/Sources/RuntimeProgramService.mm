@@ -35,10 +35,13 @@ static BOOL ValidStart(id request) {
       !DSHAgentSafeInteger(request[@"schema_version"], 1, NO) ||
       !DSHAgentCanonicalUUID(request[@"operation_id"]) || !DSHRuntimeProgramValidRoot(request[@"root"]) ||
       !DSHRuntimeProgramValidPath(request[@"entry_path"])) return NO;
-  NSString *identifier = request[@"environment_id"];
-  if (![identifier isKindOfClass:NSString.class] || identifier.length < 1 || identifier.length > 96 ||
-      [identifier rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:
-        @"abcdefghijklmnopqrstuvwxyz0123456789-"] invertedSet]].location != NSNotFound) return NO;
+  // This is looser than DSHEnvironmentValidId, which anchors the first
+  // character: a membership test accepts "-python" and "---". No catalogued
+  // environment can carry such an id, so a start naming one fails later as a
+  // missing environment rather than an invalid request. The difference is
+  // pinned in the core's tests so that unifying the two is a decision someone
+  // makes, not a side effect. See runtime_environment::valid_program_environment_id.
+  if (!DSHRuntimeProgramValidEnvironmentId(request[@"environment_id"])) return NO;
   NSArray *args = request[@"args"];
   if (![args isKindOfClass:NSArray.class] || args.count > 64) return NO;
   NSUInteger total = 0;

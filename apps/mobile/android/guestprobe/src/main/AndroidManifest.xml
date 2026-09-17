@@ -1,10 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- No INTERNET permission: everything this app does happens on the device,
-     and withholding the permission is what proves it. -->
+<!-- INTERNET is here only so the report can be POSTed back by hand, from the
+     button, after a run. The guest boot itself opens no socket: it reads two
+     files out of this APK and interprets them in-process. That the run needs no
+     network is now a claim about the code rather than something the manifest
+     proved on its own. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
     <application
         android:label="Rish Guest Probe"
         android:allowBackup="false"
+        android:usesCleartextTraffic="true"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material">
         <activity
