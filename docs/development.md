@@ -1203,6 +1203,35 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### The Android baseline, corrected
+
+Three of the five Android instrumentation failures reported throughout this
+work were **the launch defect above**, not the environment. With
+`libappmodules.so` built and a warm Metro, the suite is 105 tests with **two**
+failures:
+
+- `AndroidSubscriptionCliExecutionTest
+  officialClisExecuteFromExtractedNativeLibraryDir` — fails with *"Run this
+  probe only with `-PrishOfficialCliDir=...`"*. It is an opt-in probe that
+  **asserts instead of skipping** when its input is absent, so it fails every
+  ordinary run. Not an app defect; worth turning into a skip so the suite stops
+  carrying a permanent false red.
+- `DshModelCatalogUiTest addModelThroughReactEditorPersistsInNativeCatalog` —
+  *"Expected catalog UI not displayed"*, failing 2/2 in isolation. A stable,
+  real, pre-existing failure that predates this work and has not been
+  investigated.
+
+**Debug needs a warm Metro.** `HomeScreenRenderTest` waits 30s for the screen,
+and a cold Metro bundle for this app takes longer; the same test passes once
+the bundle is warm. Run `npx react-native start` and fetch
+`/index.bundle?platform=android` once before the UI suites, or they will look
+broken.
+
+**The lesson worth keeping:** "pre-existing environmental failure" is a label
+that has to be earned each time. Three of these five were a real defect wearing
+that label, and the only reason it surfaced was building a *release* package —
+the one configuration that bundles its JS and so cannot hide behind Metro.
+
 ### The Android app could not launch, and the release build proved it
 
 `libappmodules.so` was not in the APK — neither release nor debug. It is the
