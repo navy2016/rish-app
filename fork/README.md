@@ -41,6 +41,11 @@ stage the guest runtime before any Gradle step.
 | `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidWorkspaceStoreTest.kt` | device acceptance test run by the smoke workflow |
 | `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidRuntimeBootstrapTest.kt` | device acceptance test for the runtime probe (`bootstrapForHarness`) run by the smoke workflow |
 
+The smoke workflow's acceptance run also executes upstream's
+`AndroidRuntimeStoreTest` (session CAS persist/load/query — the chain the local
+chat persistence runs through) so a regression there fails the fork's build,
+not just upstream's never-run suite.
+
 ## Syncing with upstream
 
 ```sh
