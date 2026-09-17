@@ -37,6 +37,10 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
   rawStateRef.current = rawState;
   const [actionBusy, setActionBusy] = useState(false);
   const [browserError, setBrowserError] = useState(false);
+  // A status that cannot be read leaves no state to explain itself, and the
+  // button is disabled while it is null. Without this the card sits on
+  // "checking" for as long as the app is open and the control says nothing.
+  const [statusUnreadable, setStatusUnreadable] = useState(false);
   const [localProgress, setLocalProgress] = useState<'starting' | 'verifying' | null>(null);
   const [chatSource, setChatSource] = useState<CodexChatSource | null>(null);
   const [chatSourceError, setChatSourceError] = useState<string | null>(null);
@@ -57,13 +61,13 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
   const apply = useCallback((next: HarnessAuthStatus, scope: object & { id: HarnessSubscriptionId; epoch: number }) => {
     if (scopeRef.current === scope && next.harness_id === scope.id && scope.epoch === epoch.current) setRawState(next);
   }, []);
-  const refresh = useCallback(async (scope: object & { id: HarnessSubscriptionId; epoch: number }) => { if (scopeRef.current !== scope || refreshBusy.current.has(scope)) return; refreshBusy.current.add(scope); try { apply(await Auth.harnessAuthStatus(scope.id), scope); } finally { refreshBusy.current.delete(scope); } }, [apply]);
+  const refresh = useCallback(async (scope: object & { id: HarnessSubscriptionId; epoch: number }) => { if (scopeRef.current !== scope || refreshBusy.current.has(scope)) return; refreshBusy.current.add(scope); try { apply(await Auth.harnessAuthStatus(scope.id), scope); if (scopeRef.current === scope) setStatusUnreadable(false); } catch { if (scopeRef.current === scope) setStatusUnreadable(true); } finally { refreshBusy.current.delete(scope); } }, [apply]);
   const stopPolling = useCallback(() => { if (poll.current) clearTimeout(poll.current); poll.current = null; }, []);
   const startPolling = useCallback((scope: object & { id: HarnessSubscriptionId; epoch: number }) => { stopPolling(); const tick = () => { if (scopeRef.current !== scope || AppState.currentState !== 'active') return; refresh(scope).finally(() => { if (scopeRef.current === scope) poll.current = setTimeout(tick, 2500); }); }; poll.current = setTimeout(tick, 2500); }, [refresh, stopPolling]);
   startPollingRef.current = startPolling;
 
   useEffect(() => {
-    setRawState(null); setLocalProgress(null); setBrowserError(false); setChatSource(null); setChatSourceError(null); authTransition.current = null; const scope = { id, epoch: ++epoch.current }; scopeRef.current = scope;
+    setRawState(null); setLocalProgress(null); setBrowserError(false); setStatusUnreadable(false); setChatSource(null); setChatSourceError(null); authTransition.current = null; const scope = { id, epoch: ++epoch.current }; scopeRef.current = scope;
     if (!visible) { stopPolling(); return; }
     refresh(scope).catch(() => undefined);
     const sub = AppState.addEventListener('change', next => { if (next === 'active') { refresh(scope).catch(() => undefined); if (rawStateRef.current?.status === 'authorizing') startPollingRef.current?.(scope); } else stopPolling(); });
@@ -101,10 +105,20 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
     }
   }, [currentState?.status]);
 
+  // Every control this card owns is gated on actionBusy, and nothing resets it:
+  // the card stays mounted for the session and the reset effect leaves it
+  // alone. A rejected await used to strand it, killing the whole card in
+  // silence. The flag is released here no matter how the work ends.
+  const runAction = async (work: () => Promise<void>) => {
+    actionBusyRef.current = true; setActionBusy(true);
+    try { await work(); } catch { setStatusUnreadable(true); }
+    finally { actionBusyRef.current = false; setActionBusy(false); setLocalProgress(null); }
+  };
   const begin = async () => {
-    if (actionBusyRef.current || disabled) return; actionBusyRef.current = true; setActionBusy(true); setBrowserError(false); setLocalProgress('starting');
-    const scope = scopeRef.current; if (!scope) { actionBusyRef.current = false; setActionBusy(false); setLocalProgress(null); return; }
-    const next = await Auth.startHarnessLogin(id); actionBusyRef.current = false; setActionBusy(false); setLocalProgress(null); apply(next, scope);
+    if (actionBusyRef.current || disabled) return;
+    const scope = scopeRef.current; if (!scope) return;
+    setBrowserError(false); setLocalProgress('starting');
+    await runAction(async () => { apply(await Auth.startHarnessLogin(id), scope); });
   };
   const openAuthorization = () => {
     const login = state?.login;
@@ -114,10 +128,10 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
       .then(() => { setBrowserError(false); })
       .catch(() => { setLocalProgress(null); setBrowserError(true); });
   };
-  const cancel = async () => { const login = state?.login; const scope = scopeRef.current; if (!login || !scope || actionBusyRef.current) return; actionBusyRef.current = true; setActionBusy(true); setBrowserError(false); apply(await Auth.cancelHarnessLogin(id, login.session_id), scope); actionBusyRef.current = false; setActionBusy(false); };
-  const logout = async () => { const scope = scopeRef.current; if (!scope || actionBusyRef.current) return; actionBusyRef.current = true; setActionBusy(true); setBrowserError(false); apply(await Auth.logoutHarness(id), scope); actionBusyRef.current = false; setActionBusy(false); };
-  const submitCode = async () => { const login = state?.login; const scope = scopeRef.current; if (!login?.can_submit_code || !scope || actionBusyRef.current) return; actionBusyRef.current = true; setActionBusy(true); setBrowserError(false); apply(await Auth.presentHarnessLoginCode(id, login.session_id, locale), scope); actionBusyRef.current = false; setActionBusy(false); };
-  const selectAccount = async () => { if (actionBusyRef.current || currentState?.status !== 'signed_in') return; actionBusyRef.current = true; setActionBusy(true); setChatSourceError(null); const source = await (id === 'claude-code' ? Auth.selectClaudeChatSource('subscription') : Auth.selectCodexChatSource('subscription')); setChatSource(source); setChatSourceError(source.error_code); if (!source.error_code) onCredentialChanged?.(source); actionBusyRef.current = false; setActionBusy(false); };
+  const cancel = async () => { const login = state?.login; const scope = scopeRef.current; if (!login || !scope || actionBusyRef.current) return; setBrowserError(false); await runAction(async () => { apply(await Auth.cancelHarnessLogin(id, login.session_id), scope); }); };
+  const logout = async () => { const scope = scopeRef.current; if (!scope || actionBusyRef.current) return; setBrowserError(false); await runAction(async () => { apply(await Auth.logoutHarness(id), scope); }); };
+  const submitCode = async () => { const login = state?.login; const scope = scopeRef.current; if (!login?.can_submit_code || !scope || actionBusyRef.current) return; setBrowserError(false); await runAction(async () => { apply(await Auth.presentHarnessLoginCode(id, login.session_id, locale), scope); }); };
+  const selectAccount = async () => { if (actionBusyRef.current || currentState?.status !== 'signed_in') return; setChatSourceError(null); await runAction(async () => { const source = await (id === 'claude-code' ? Auth.selectClaudeChatSource('subscription') : Auth.selectCodexChatSource('subscription')); setChatSource(source); setChatSourceError(source.error_code); if (!source.error_code) onCredentialChanged?.(source); }); };
   const expired = currentState?.login?.expires_at !== undefined && currentState.login.expires_at * 1000 <= Date.now();
   const progressPhase = currentState?.status === 'authorizing' ? currentState.login?.phase ?? (currentState.login?.user_code ? 'waiting_for_browser' : 'starting') : null;
   const startingText = t(id === 'claude-code' ? 'settings.auth.progressStartingClaude' : 'settings.auth.progressStarting');
@@ -133,7 +147,7 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
     {currentState?.status === 'signed_in' && currentState.account && <Text style={styles.settingDescription}>{currentState.account.label}{currentState.account.plan ? ` · ${currentState.account.plan}` : ''}</Text>}
     {currentState?.status === 'signed_in' && chatSource && <Text style={styles.settingDescription}>{t(chatSource.source === 'subscription' ? 'settings.auth.chatSourceSubscription' : 'settings.auth.chatSourceApiKey')}{chatSource.ready ? '' : ` · ${t('settings.auth.chatSourceNotReady')}`}</Text>}
     {chatSourceError && <Text style={styles.proxyError}>{t('settings.auth.chatSourceError')}</Text>}
-    {(currentState?.status === 'unavailable' || currentState?.runtime.available === false) && <Text style={styles.proxyError}>{unavailableReason}</Text>}
+    {(currentState?.status === 'unavailable' || currentState?.runtime.available === false || (currentState === null && statusUnreadable)) && <Text style={styles.proxyError}>{unavailableReason}</Text>}
     {currentState?.status === 'authorizing' && currentState.login?.user_code && <><Text selectable style={styles.authCode}>{currentState.login.user_code}</Text>{id === 'codex' && <Text style={styles.credentialBody}>{t('settings.auth.codePasteHint')}</Text>}</>}
     {browserError && <Text style={styles.proxyError}>{t('settings.auth.browserError')}</Text>}
     <View style={styles.buttonRow}>

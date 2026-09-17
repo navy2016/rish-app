@@ -26,10 +26,17 @@ export function useTaskActions(
           (!callbacks.current.ready || AppState.currentState !== 'active')
         )
           continue;
-        const handled =
-          event.action === 'cancel'
-            ? (await callbacks.current.cancel(event.runId), true)
-            : await callbacks.current.open(event.conversationId);
+        let handled = false;
+        try {
+          handled =
+            event.action === 'cancel'
+              ? (await callbacks.current.cancel(event.runId), true)
+              : await callbacks.current.open(event.conversationId);
+        } catch {
+          // One event that throws must not take the rest of the batch with it.
+          // It stays pending, so a later flush can carry it.
+          continue;
+        }
         if (!handled) continue;
         pending.current.delete(key);
         seen.current.add(key);

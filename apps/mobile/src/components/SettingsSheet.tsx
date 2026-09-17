@@ -327,7 +327,9 @@ export function SettingsSheet(props: Props) {
                   {modelDescription(props.model)}
                 </Text>
               </View>
-              <Text style={styles.value}>{modelName(props.model)}</Text>
+              <Text numberOfLines={1} style={styles.value}>
+                {modelName(props.model)}
+              </Text>
               <AppIcon color={colors.faint} icon={ChevronRight} size={18} />
             </Pressable>
             <Divider />
@@ -819,11 +821,16 @@ const createStyles = (colors: ThemePalette) =>
       marginTop: 7,
     },
     linkRow: { minHeight: 52, flexDirection: 'row', alignItems: 'center' },
+    // A model name is typed by the person and capped at 80 characters, which
+    // at this size outruns the row. Without shrinking it, the row's own title
+    // and description are the ones that collapse. See localPill below.
     value: {
       color: colors.textDim,
       fontFamily: fonts.mono,
       fontSize: 9,
       marginLeft: 10,
+      maxWidth: 132,
+      flexShrink: 1,
     },
     segmented: {
       minHeight: 42,

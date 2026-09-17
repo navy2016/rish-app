@@ -5258,6 +5258,20 @@ export function createCompletionController(
             return outcome('persistence_pending', state);
           }
           if (!cleanupPending.transaction.commit(durability.snapshot, cleanupPending.discardProof)) {
+            // The first attempt rolls back, releases the latch and publishes;
+            // this one did none of it. A commit refused on digest drift stays
+            // refused, so the latch outlived every retry and kept blocking
+            // send, retry, resume, cancel and conversation change in silence.
+            cleanupPending.transaction.rollback();
+            if (pendingAgentCleanup === cleanupPending) pendingAgentCleanup = null;
+            publish(
+              stateFor('blocked', {
+                conversationId: cleanupPending.conversationId,
+                turnId: cleanupPending.turnId,
+                attemptId: cleanupPending.attemptId,
+                failureCode: 'E_COMPLETION_RESULT_CORRELATION',
+              }),
+            );
             return outcome('blocked', state);
           }
           if (pendingAgentCleanup === cleanupPending) pendingAgentCleanup = null;

@@ -627,6 +627,34 @@ test('blocks a non-null project root when the producer cannot prove all V2 capab
   expect(fixture.persistCurrent).not.toHaveBeenCalled();
 });
 
+test('an indeterminate result for a departed owner does not wedge the controller', async () => {
+  const fixture = harness();
+  const persisted = deferred<{ status: 'unknown' }>();
+  fixture.persistCurrent.mockReturnValueOnce(persisted.promise as never);
+  const binding = fixture.controller.bindWorkspace(
+    bindInput(fixture.conversationId),
+  );
+
+  // Let the bind actually reach the write before the picker closes; that is
+  // the window the latch used to be installed in. Nothing can retry a
+  // candidate nobody owns, so it must not outlive the owner: it was installed
+  // anyway, and invalidate() refuses while it is set.
+  for (let index = 0; index < 16; index += 1) await Promise.resolve();
+  expect(fixture.persistCurrent).toHaveBeenCalledTimes(1);
+  fixture.controller.invalidate();
+  persisted.resolve({ status: 'unknown' });
+  await expect(binding).resolves.toMatchObject({ status: 'stale' });
+
+  // The wedge showed up here: a stranded latch made every later bind refuse
+  // with E_WORKSPACE_PERSISTENCE for the life of the app.
+  fixture.controller.invalidate();
+  fixture.persistCurrent.mockResolvedValueOnce({ status: 'committed' });
+  const again = await fixture.controller.bindWorkspace(
+    bindInput(fixture.conversationId),
+  );
+  expect(again).not.toMatchObject({ code: 'E_WORKSPACE_PERSISTENCE' });
+});
+
 test('an indeterminate persistence result retains the Store owner for exact retry', async () => {
   const fixture = harness();
   fixture.persistCurrent.mockResolvedValueOnce({ status: 'unknown' });

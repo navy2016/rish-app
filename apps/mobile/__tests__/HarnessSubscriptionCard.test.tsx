@@ -113,6 +113,29 @@ test('browser rejection is shown and a retry can succeed', async () => {
   await act(async () => renderer.unmount());
 });
 
+// Every control on this card is gated on one busy flag that nothing resets:
+// the card stays mounted for the session. A rejected action used to strand it,
+// leaving the whole card inert and silent for the rest of the run.
+test('a rejected action does not leave the card permanently inert', async () => {
+  auth.harnessAuthStatus.mockResolvedValue(status('codex', 'signed_in'));
+  auth.codexChatSource.mockResolvedValue({ source: 'api_key', ready: true, error_code: null } as never);
+  auth.logoutHarness.mockRejectedValueOnce(new Error('bridge lost'))
+    .mockResolvedValueOnce(status('codex', 'signed_out'));
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<HarnessSubscriptionCard id="codex" visible />); });
+
+  const logout = () => renderer.root.findByProps({ accessibilityLabel: 'settings.auth.logout' });
+  await act(async () => logout().props.onPress());
+  expect(auth.logoutHarness).toHaveBeenCalledTimes(1);
+
+  // The card has to still answer. Before the fix the busy flag was stranded
+  // and this second press did nothing at all.
+  expect(logout().props.disabled).toBe(false);
+  await act(async () => logout().props.onPress());
+  expect(auth.logoutHarness).toHaveBeenCalledTimes(2);
+  await act(async () => renderer.unmount());
+});
+
 test('native expiry uses Unix seconds rather than milliseconds', async () => {
   auth.harnessAuthStatus.mockResolvedValue(status('codex', 'authorizing', {session_id: 'time', expires_at: Math.floor(Date.now() / 1000) + 600}));
   let renderer!: TestRenderer.ReactTestRenderer;

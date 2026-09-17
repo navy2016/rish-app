@@ -378,6 +378,7 @@ export function ChatComposer(props: Props) {
             !props.sending && (locked || !canSend) && styles.sendDisabled,
             pressed && styles.pressed,
           ]}
+          testID="composer-send"
         >
           {props.sending ? (
             <AppIcon
@@ -507,7 +508,10 @@ const createStyles = (colors: ThemePalette) =>
     },
     authActions: { flexDirection: 'row', gap: 8, marginBottom: 8 },
     capabilityNote: { color: colors.muted, fontSize: 11, marginBottom: 6 },
-    actions: { flexDirection: 'row', flexWrap: 'wrap', rowGap: 8, alignItems: 'center', marginTop: 5 },
+    // Send must stay on this row. The chips carry caller-supplied names, so
+    // their widths are not ours to bound; wrapping moved send below them
+    // instead. The chips shrink and truncate now, and nothing wraps.
+    actions: { flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', marginTop: 5 },
     actionSpacer: { flex: 1 },
     addAttachment: {
       width: 44,
@@ -528,6 +532,9 @@ const createStyles = (colors: ThemePalette) =>
       alignItems: 'center',
       gap: 5,
       maxWidth: 132,
+      // React Native defaults flexShrink to 0, so without this the chip keeps
+      // its full width and the row overflows rather than the label truncating.
+      flexShrink: 1,
       marginRight: 6,
     },
     workspaceText: { color: colors.textDim, fontSize: 10, fontWeight: '600', flexShrink: 1 },
@@ -543,6 +550,7 @@ const createStyles = (colors: ThemePalette) =>
       flexDirection: 'row',
       alignItems: 'center',
       maxWidth: 170,
+      flexShrink: 1,
     },
     modelDot: {
       width: 5,

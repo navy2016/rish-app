@@ -34,6 +34,10 @@ pub const PUSH_REASONS: &[&str] = &[
     "rejected",
     "auth_failed",
     "ambiguous",
+    // A push whose network phase outran its deadline. The host reports this
+    // one as ambiguous because the server may already have it, so refusing
+    // the token discards the very case the caller must not retry blind.
+    "timeout",
     "cancelled",
     "transport",
 ];
@@ -331,6 +335,35 @@ fn reduce_json_inner(input: &str) -> Result<Value, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Every token AgentGitToolExecutor.mm can hand to a push failure. The set
+    // is closed to keep server text out of the transcript, so a token the host
+    // emits and this set omits turns a real outcome into a malformed request.
+    #[test]
+    fn every_push_reason_the_host_emits_is_accepted() {
+        for (reason, ambiguous) in [
+            ("origin_unsafe", false),
+            ("credential_missing", false),
+            ("remote_moved", false),
+            ("non_fast_forward", false),
+            ("rejected", false),
+            ("auth_failed", false),
+            ("timeout", true),
+            ("cancelled", true),
+            ("transport", true),
+        ] {
+            let result = failure_result("git_push", "E_AGENT_TOOL_FAILED", Some(reason), ambiguous)
+                .unwrap_or_else(|_| panic!("host reason {reason} was refused"));
+            assert!(result["feedback"].as_str().unwrap().contains(reason));
+            // The point of the timeout token: the caller must not retry blind.
+            assert_eq!(result["effect_may_have_occurred"], json!(ambiguous));
+        }
+        // The closed set still holds: unknown text cannot reach a transcript.
+        assert_eq!(
+            failure_result("git_push", "E_AGENT_TOOL_FAILED", Some("fatal: repo not found"), false),
+            Err(StoreError::InvalidArgument)
+        );
+    }
 
     #[test]
     fn sha1_matches_the_standard_vectors() {

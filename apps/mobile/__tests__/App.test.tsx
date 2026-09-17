@@ -3,7 +3,7 @@
  */
 
 import React from 'react';
-import { AccessibilityInfo, Alert, AppState, Keyboard, StyleSheet, Text, type AppStateStatus } from 'react-native';
+import { AccessibilityInfo, Alert, AppState, Dimensions, Keyboard, StyleSheet, Text, type AppStateStatus } from 'react-native';
 import ReactTestRenderer, {
   act,
   type ReactTestInstance,
@@ -5409,6 +5409,146 @@ describe('project context Home integration H3', () => {
 
     await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
     expect(actionByLabel(root, 'Pending project cleanup')).toBeDefined();
+  });
+
+  // The Drawer is admitted while this recovery is settled, so its actions have
+  // to answer. Refusing what admission allowed made New chat do nothing at all
+  // and say nothing, with no way to reach the recovery it was waiting on.
+  test('routes New chat to direct recovery while an ambiguous write is settled', async () => {
+    const fixture = storedSetupProject();
+    queuePresentSession(fixture.stored.serialize());
+    const persisted = deferred<boolean>();
+    const renderer = await renderAppOpeningStoredConversation();
+    const root = renderer.root;
+    mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+      async request => {
+        const saved = await persisted.promise;
+        return saved ? commitBridgedCandidate(request) : unknownResult();
+      },
+    );
+    await openProjectsSurface(root);
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+    });
+    await act(async () => root.findByType(ProjectsSurface).props.onClose());
+    mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+      schema_version: 1,
+      status: 'unknown',
+    });
+    persisted.resolve(false);
+    await act(async () => {
+      await settle();
+      await settle();
+      root.findByType(ProjectsSurface).props.onDismiss();
+    });
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    expect(root.findByType(ChatDrawer).props.visible).toBe(true);
+    const openedConversationId = root.findByType(ChatDrawer).props.activeId;
+
+    await act(async () => {
+      await root.findByType(ChatDrawer).props.onNewChat();
+      root.findByType(ChatDrawer).props.onDismiss();
+      await settle();
+    });
+
+    expect(root.findByType(ChatDrawer).props.visible).toBe(false);
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(openedConversationId);
+    expect(visibleContextSheets(root)).toHaveLength(1);
+  });
+
+  // Settings is one of six Drawer controls that asked the strict guard while
+  // the Drawer itself was admitted by the tolerant one. Each was inert and
+  // silent in this state; they route to the recovery instead.
+  test('routes Drawer Settings to direct recovery while an ambiguous write is settled', async () => {
+    const fixture = storedSetupProject();
+    queuePresentSession(fixture.stored.serialize());
+    const persisted = deferred<boolean>();
+    const renderer = await renderAppOpeningStoredConversation();
+    const root = renderer.root;
+    mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+      async request => {
+        const saved = await persisted.promise;
+        return saved ? commitBridgedCandidate(request) : unknownResult();
+      },
+    );
+    await openProjectsSurface(root);
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+    });
+    await act(async () => root.findByType(ProjectsSurface).props.onClose());
+    mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+      schema_version: 1,
+      status: 'unknown',
+    });
+    persisted.resolve(false);
+    await act(async () => {
+      await settle();
+      await settle();
+      root.findByType(ProjectsSurface).props.onDismiss();
+    });
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      root.findByType(ChatDrawer).props.onOpenSettings();
+      root.findByType(ChatDrawer).props.onDismiss();
+      await settle();
+    });
+
+    expect(root.findByType(SettingsSheet).props.visible).toBe(false);
+    expect(visibleContextSheets(root)).toHaveLength(1);
+  });
+
+  // A docked Drawer never fires onDismiss, so a hand-off staged for the
+  // dismissal has to run when the Drawer closes or it is stranded and the
+  // control is silent again -- on the layout where the Drawer is always there.
+  test('hands off New chat to direct recovery on a docked wide layout', async () => {
+    const narrow = Dimensions.get('window');
+    Dimensions.set({
+      window: { ...narrow, width: 1024, height: 1366 },
+      screen: { ...narrow, width: 1024, height: 1366 },
+    } as never);
+    try {
+      const fixture = storedSetupProject();
+      queuePresentSession(fixture.stored.serialize());
+      const persisted = deferred<boolean>();
+      const renderer = await renderAppOpeningStoredConversation();
+      const root = renderer.root;
+      expect(root.findByType(ChatDrawer).props.docked).toBe(true);
+      mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+        async request => {
+          const saved = await persisted.promise;
+          return saved ? commitBridgedCandidate(request) : unknownResult();
+        },
+      );
+      await openProjectsSurface(root);
+      await act(async () => {
+        root.findByType(ProjectsSurface).props.onUnbindFromChat();
+        await settle();
+      });
+      await act(async () => root.findByType(ProjectsSurface).props.onClose());
+      mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+        schema_version: 1,
+        status: 'unknown',
+      });
+      persisted.resolve(false);
+      await act(async () => {
+        await settle();
+        await settle();
+        root.findByType(ProjectsSurface).props.onDismiss();
+      });
+
+      // No onDismiss is fired here: a docked surface never sends one.
+      await act(async () => {
+        await root.findByType(ChatDrawer).props.onNewChat();
+        await settle();
+      });
+      expect(visibleContextSheets(root)).toHaveLength(1);
+    } finally {
+      Dimensions.set({ window: narrow, screen: narrow } as never);
+    }
   });
 
   test('drops a queued Drawer opener when bootstrap restores lifecycle recovery first', async () => {

@@ -958,8 +958,14 @@ export class WorkspaceBindingController {
         durability.status === 'session_only' ||
         durability.status === 'unknown'
       ) {
-        // These are recoverable owner states, not rollback permission. The
-        // Store candidate remains installed for retryPersistence().
+        // These are recoverable owner states, not rollback permission: the
+        // write may have landed, so nothing here rolls it back. The latch
+        // exists only so retryPersistence can act on it, and that refuses a
+        // candidate nobody owns. Installing one for an owner that is already
+        // gone left it with no actor and no exit, because invalidate() refuses
+        // while it is set -- so every later bindWorkspace returned
+        // E_WORKSPACE_PERSISTENCE for the life of the app.
+        if (!candidateStillOwned) return this.stale(operationId);
         this.pendingPersistence = {
           operation,
           transaction,
@@ -968,7 +974,6 @@ export class WorkspaceBindingController {
           workspace: resolved.workspace,
           project,
         };
-        if (!candidateStillOwned) return this.stale(operationId);
         return {
           status: durability.status,
           operationId,
@@ -1368,7 +1373,12 @@ export class WorkspaceBindingController {
         durability.status === 'session_only' ||
         durability.status === 'unknown'
       ) {
-        if (!candidateStillOwned) return this.stale(operation.operationId);
+        if (!candidateStillOwned) {
+          // The write stands; only the latch is dropped. Nothing can retry a
+          // candidate nobody owns, and holding it keeps invalidate() refusing.
+          this.pendingPersistence = null;
+          return this.stale(operation.operationId);
+        }
         return {
           status: durability.status,
           operationId: operation.operationId,
@@ -1378,7 +1388,9 @@ export class WorkspaceBindingController {
           project: pending.project,
         };
       }
-      if (!candidateStillOwned) return this.stale(operation.operationId);
+      // not_committed means the write did not land, so the rollback below is
+      // safe whoever owns the candidate now. Returning before it left both the
+      // Store candidate and the latch behind for good.
       if (!pending.transaction.rollback()) {
         return {
           status: 'conflict',
@@ -1387,6 +1399,7 @@ export class WorkspaceBindingController {
         };
       }
       this.pendingPersistence = null;
+      if (!candidateStillOwned) return this.stale(operation.operationId);
       return {
         status: 'not_committed',
         operationId: operation.operationId,

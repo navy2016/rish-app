@@ -1239,7 +1239,7 @@ describe('ProjectContextController V1', () => {
     await attach(harness);
     await selectKnownPath(harness);
     const run = harness.controller.prepare(actionToken(harness));
-    for (let index = 0; index < 4; index += 1) await Promise.resolve();
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
     expect(harness.native.prepare).toHaveBeenCalledTimes(1);
     await attach(harness, OTHER_CONVERSATION_ID);
     prepared.resolve(manifest(SNAPSHOT_B));
@@ -1283,7 +1283,7 @@ describe('ProjectContextController V1', () => {
     await attach(harness);
     await selectKnownPath(harness);
     const run = harness.controller.prepare(actionToken(harness));
-    for (let index = 0; index < 4; index += 1) await Promise.resolve();
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
 
     expect(harness.store.replacePrepared).toHaveBeenCalledTimes(1);
     expect(harness.controller.getState().phase).not.toBe('review');
@@ -1305,7 +1305,7 @@ describe('ProjectContextController V1', () => {
     await attach(harness);
     await selectKnownPath(harness);
     const preparing = harness.controller.prepare(actionToken(harness));
-    for (let index = 0; index < 4; index += 1) await Promise.resolve();
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
     harness.store.replaceContext(
       CONVERSATION_ID,
       readyContext(SNAPSHOT_B, CONSENT_B),
@@ -1432,7 +1432,7 @@ describe('ProjectContextController V1', () => {
     await harness.controller.prepare(actionToken(harness));
     harness.persistCurrent.mockImplementationOnce(() => persistence.promise);
     const confirming = harness.controller.confirm(actionToken(harness));
-    for (let index = 0; index < 4; index += 1) await Promise.resolve();
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
     expect(harness.store.serializeContext()).toContain(SNAPSHOT_B);
     harness.store.replaceContext(
       CONVERSATION_ID,
@@ -1473,7 +1473,7 @@ describe('ProjectContextController V1', () => {
       readyContext(SNAPSHOT_C, CONSENT_C),
     );
     confirmation.resolve(consent(SNAPSHOT_B, CONSENT_B));
-    for (let index = 0; index < 4; index += 1) await Promise.resolve();
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
     expect(harness.controller.getState()).toMatchObject({
       phase: 'persistence_pending',
       pendingPersistence: { kind: 'inspection' },
@@ -1847,7 +1847,7 @@ describe('ProjectContextController V1', () => {
     });
     harness.persistCurrent.mockImplementationOnce(() => persistence.promise);
     const run = harness.controller.attachConversation(CONVERSATION_ID);
-    for (let index = 0; index < 4; index += 1) await Promise.resolve();
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
     expect(harness.controller.getState()).toMatchObject({
       phase: 'persistence_pending',
       pendingPersistence: { kind: 'inspection' },
@@ -2050,7 +2050,7 @@ describe('ProjectContextController V1', () => {
       });
       harness.persistCurrent.mockImplementationOnce(() => inspectWrite.promise);
       const attaching = harness.controller.attachConversation(CONVERSATION_ID);
-      for (let index = 0; index < 4; index += 1) await Promise.resolve();
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
 
       expect(harness.store.applyProjectContextAction).toHaveBeenCalledWith(
         CONVERSATION_ID,

@@ -936,11 +936,15 @@ export function WorkspaceDrawer({
         ]}
       >
         <View style={styles.header}>
-          <View>
+          <View style={styles.headerText}>
             <Text style={styles.eyebrow}>
               {t('files.onDevice').toLocaleUpperCase()}
             </Text>
-            <Text accessibilityRole="header" style={styles.title}>
+            <Text
+              accessibilityRole="header"
+              numberOfLines={1}
+              style={styles.title}
+            >
               {openFile === null
                 ? workspaceLabel ?? projectScope?.label ?? t('files.title')
                 : openFile.name}
@@ -1486,6 +1490,10 @@ const createStyles = (colors: ThemePalette) =>
       alignItems: 'center',
       justifyContent: 'space-between',
     },
+    // A file name is unbounded, and space-between pushes the second child past
+    // the edge once the first outgrows the row. The title column yields width
+    // and truncates so close stays on screen and the row keeps its height.
+    headerText: { flex: 1, minWidth: 0 },
     eyebrow: {
       color: colors.accent,
       fontSize: 8,
@@ -1505,6 +1513,8 @@ const createStyles = (colors: ThemePalette) =>
       backgroundColor: colors.surface,
       alignItems: 'center',
       justifyContent: 'center',
+      flexShrink: 0,
+      marginLeft: 8,
     },
     pathBar: {
       height: 46,

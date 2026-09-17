@@ -980,13 +980,13 @@ export function createProjectContextController(
     try {
       if (owner.root !== null) {
         if (typeof dependencies.native.discardV2 !== 'function') return false;
-        await dependencies.native.discardV2({
+        await boundedNative(dependencies.native.discardV2({
           schema_version: 2,
           snapshot_id: snapshotId,
           root: cloneRoot(owner.root)!,
-        });
+        }));
       } else {
-        await dependencies.native.discard(snapshotId);
+        await boundedNative(dependencies.native.discard(snapshotId));
       }
       return true;
     } catch {
@@ -1063,13 +1063,13 @@ export function createProjectContextController(
         if (typeof dependencies.native.discardV2 !== 'function') {
           return setFailure('E_CONTEXT_NATIVE');
         }
-        await dependencies.native.discardV2({
+        await boundedNative(dependencies.native.discardV2({
           schema_version: 2,
           snapshot_id: snapshotId,
           root: cloneRoot(operation.root)!,
-        });
+        }));
       } else {
-        await dependencies.native.discard(snapshotId);
+        await boundedNative(dependencies.native.discard(snapshotId));
       }
       if (!operationLive(operation)) return rejectStale();
       const context = currentContext();
@@ -1344,14 +1344,14 @@ export function createProjectContextController(
         if (typeof dependencies.native.prepareV2 !== 'function') {
           return setFailure('E_CONTEXT_NATIVE');
         }
-        const v2Manifest = await dependencies.native.prepareV2({
+        const v2Manifest = await boundedNative(dependencies.native.prepareV2({
           schema_version: 2,
           root: cloneRoot(operation.root)!,
           conversation_id: operation.runtimeContextId!,
           model_id: operation.modelId,
           policy: 'chat-read-v1',
           selected_paths: [...intent.selectedPaths],
-        });
+        }));
         const projected = manifestV2ForController(
           v2Manifest,
           operation.root,
@@ -1360,7 +1360,7 @@ export function createProjectContextController(
         if (projected === null) return setFailure('E_CONTEXT_RESULT_INVALID');
         manifest = cloneManifest(projected);
       } else {
-        manifest = cloneManifest(await dependencies.native.prepare(selection));
+        manifest = cloneManifest(await boundedNative(dependencies.native.prepare(selection)));
       }
     } catch (error) {
       if (!operationLive(operation)) return rejectStale();
@@ -1898,11 +1898,11 @@ export function createProjectContextController(
         if (typeof dependencies.native.confirmV2 !== 'function') {
           return setFailure('E_CONTEXT_NATIVE');
         }
-        const v2Receipt = await dependencies.native.confirmV2({
+        const v2Receipt = await boundedNative(dependencies.native.confirmV2({
           schema_version: 2,
           snapshot_id: manifest.snapshot_id,
           root: cloneRoot(operation.root)!,
-        });
+        }));
         receipt = consentV2ForController(
           v2Receipt,
           operation.root,
@@ -1910,7 +1910,7 @@ export function createProjectContextController(
         );
       } else {
         receipt = {
-          ...(await dependencies.native.confirm(manifest.snapshot_id)),
+          ...(await boundedNative(dependencies.native.confirm(manifest.snapshot_id))),
         };
       }
       if (receipt === null || !matchingConsent(manifest, receipt)) {
@@ -2376,25 +2376,32 @@ export function createProjectContextController(
         if (typeof dependencies.native.listCandidatesV2 !== 'function') {
           return setFailure('E_CONTEXT_NATIVE');
         }
-        const v2Page = await dependencies.native.listCandidatesV2({
+        const v2Page = await boundedNative(dependencies.native.listCandidatesV2({
           schema_version: 1,
           root: cloneRoot(operation.root)!,
           query: operation.query,
           cursor,
-        });
+        }));
         const projected = pageV2ForController(v2Page, operation.root);
         if (projected === null) return setFailure('E_CONTEXT_RESULT_INVALID');
         page = projected;
       } else {
-        page = await dependencies.native.listCandidates(
+        page = await boundedNative(dependencies.native.listCandidates(
           owner.projectId,
           operation.query,
           cursor,
-        );
+        ));
       }
       return applyPage(operation, page, true);
     } catch (error) {
       return failList(operation, error);
+    } finally {
+      // setFailure and failList publish a phase and nothing else, so a failed
+      // page left this set. Load more then refuses for good and Prepare stays
+      // disabled with it, which the sheet gives no way to undo.
+      if (state.list.loadingMore) {
+        publish({ list: { ...state.list, loadingMore: false } });
+      }
     }
   };
 

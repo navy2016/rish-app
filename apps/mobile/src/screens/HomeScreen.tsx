@@ -1811,7 +1811,18 @@ export function HomeScreen({
               await projectContextLifecycleController.beginDestructiveTransition(
                 begin.token,
               );
-            if (outcome.status !== 'completed') return false;
+            if (outcome.status !== 'completed') {
+              // The transition has already begun, so the Store is latched with
+              // the write unsettled. Returning bare left that invisible: this
+              // is the surface every other lifecycle outcome reaches.
+              if (
+                outcome.status === 'blocked' ||
+                outcome.status === 'cleanup_pending' ||
+                outcome.status === 'persistence_pending'
+              )
+                setRequestFailure(outcome.code);
+              return false;
+            }
             return { status: 'rebound' as const };
           } catch {
             return false;
@@ -2129,6 +2140,11 @@ export function HomeScreen({
       return;
     }
     let restoredSelection = false;
+    // Set only once the probe effect below has been handed the job of
+    // clearing runtimeChecking. A throw before that point must not leave
+    // the flag set: Retry load is disabled by it, and retrySessionLoad
+    // refuses on it too, so the only offered way out would be gone.
+    let probeOwnsRuntimeChecking = false;
     try {
       const load = sessionAvailable
         ? await sessionPersistence.loadSessionSnapshotOutcome()
@@ -2194,6 +2210,7 @@ export function HomeScreen({
       setSelectionHydrated(restoredSelection);
       lifecycleBootstrapReadyRef.current = restoredSelection;
       setLifecycleBootstrapReady(restoredSelection);
+      probeOwnsRuntimeChecking = restoredSelection;
       if (
         restoredSelection &&
         store.getState().projectContextDestructiveTransition === null &&
@@ -2216,7 +2233,7 @@ export function HomeScreen({
         ensureConversation();
       setChatState(store.getState());
     } finally {
-      if (!restoredSelection) setRuntimeChecking(false);
+      if (!probeOwnsRuntimeChecking) setRuntimeChecking(false);
       if (!restoredSelection) {
         lifecycleBootstrapReadyRef.current = false;
         setLifecycleBootstrapReady(false);
@@ -3495,6 +3512,7 @@ export function HomeScreen({
       return;
     }
     lifecycleActionInFlight.current = true;
+    try {
     if (
       !(await projectContextController.beforeConversationChange(
         expected.conversationId,
@@ -3529,6 +3547,13 @@ export function HomeScreen({
       expected.conversationId,
       expected.selectedConversationId,
     );
+    } finally {
+      // finishLifecycleOutcome releases this, but only when it is reached.
+      // A rejected await before it stranded the flag, and every lifecycle
+      // recovery control is gated on it -- as is destructiveAuthorityActive,
+      // so conversation switching went with it.
+      lifecycleActionInFlight.current = false;
+    }
   }, [
     completionController,
     finishLifecycleOutcome,
@@ -3554,16 +3579,24 @@ export function HomeScreen({
         return;
       }
       lifecycleActionInFlight.current = true;
-      const result =
-        await projectContextLifecycleController.retryDestructivePersistence(
-          expected,
+      try {
+        const result =
+          await projectContextLifecycleController.retryDestructivePersistence(
+            expected,
+          );
+        await finishLifecycleOutcome(
+          result,
+          expected.action,
+          expected.conversationId,
+          store.getState().selectedConversationId,
         );
-      await finishLifecycleOutcome(
-        result,
-        expected.action,
-        expected.conversationId,
-        store.getState().selectedConversationId,
-      );
+      } finally {
+      // finishLifecycleOutcome releases this, but only when it is reached.
+      // A rejected await before it stranded the flag, and every lifecycle
+      // recovery control is gated on it -- as is destructiveAuthorityActive,
+      // so conversation switching went with it.
+        lifecycleActionInFlight.current = false;
+      }
     }, [finishLifecycleOutcome, projectContextLifecycleController, store],
   );
 
@@ -3584,16 +3617,22 @@ export function HomeScreen({
         return;
       }
       lifecycleActionInFlight.current = true;
-      const result =
-        await projectContextLifecycleController.retryDestructiveCleanup(
-          expected,
+      try {
+        const result =
+          await projectContextLifecycleController.retryDestructiveCleanup(
+            expected,
+          );
+        await finishLifecycleOutcome(
+          result,
+          expected.action,
+          expected.conversationId,
+          store.getState().selectedConversationId,
         );
-      await finishLifecycleOutcome(
-        result,
-        expected.action,
-        expected.conversationId,
-        store.getState().selectedConversationId,
-      );
+      } finally {
+        // See confirmLifecycleIntent: the flag has to be released whatever the
+        // await does, or every lifecycle recovery control stays inert.
+        lifecycleActionInFlight.current = false;
+      }
     }, [finishLifecycleOutcome, projectContextLifecycleController, store],
   );
 
@@ -3838,14 +3877,19 @@ export function HomeScreen({
     [destructiveAuthorityActive, nativeAvailable, projectContextController],
   );
 
+  // The drawer is admitted with rootSurfaceAdmissionAllowed(true), which
+  // tolerates a settled recovery. An action that refuses what admission
+  // allowed is a button that does nothing and says nothing, so an entry guard
+  // asks with the same tolerance and routes to the recovery sheet itself.
+  // Re-validation after an await stays strict: nothing destructive proceeds.
   const drawerSourceIsLive = useCallback(
-    (expectedEpoch: number) =>
+    (expectedEpoch: number, allowSettledDirectRecovery = false) =>
       (!nativeAvailable || sessionProjectionReady.current) &&
       lifecycleBootstrapReadyRef.current &&
       (wideLayout || drawerVisibleRef.current) &&
       drawerSurfaceEpoch.current === expectedEpoch &&
       !contextSheetVisibleRef.current &&
-      !destructiveAuthorityActive() &&
+      !destructiveAuthorityActive(allowSettledDirectRecovery) &&
       !projectContextOperationInFlight(projectContextController.getState()),
     [destructiveAuthorityActive, nativeAvailable, projectContextController, wideLayout],
   );
@@ -3862,18 +3906,26 @@ export function HomeScreen({
     [destructiveAuthorityActive, nativeAvailable, projectContextController],
   );
 
+  // A docked Drawer never dismisses: SlidingSurface returns before it can fire
+  // onDismiss (SlidingSurface.tsx:76). Every caller that stages work for the
+  // dismissal and then closes would strand it on a wide layout, so the hand-off
+  // runs here instead. It re-validates what it was given, so a close that
+  // staged nothing is a no-op.
+  const drawerDismissHandoff = useRef<(() => void) | null>(null);
+  const drawerRecoveryRouter = useRef<((epoch: number) => boolean) | null>(null);
   const closeDrawerSurface = useCallback(() => {
     drawerSurfaceEpoch.current += 1;
     drawerVisibleRef.current = false;
     setDrawerVisible(false);
-  }, []);
+    if (wideLayout) drawerDismissHandoff.current?.();
+  }, [wideLayout]);
 
   const createConversation = useCallback(async (
     expectedDrawerEpoch: number,
   ) => {
     if (
       navigationMutationInFlight.current ||
-      !drawerSourceIsLive(expectedDrawerEpoch)
+      !drawerSourceIsLive(expectedDrawerEpoch, true)
     )
       return;
     navigationMutationInFlight.current = true;
@@ -3980,7 +4032,7 @@ export function HomeScreen({
     async (id: string, expectedDrawerEpoch: number) => {
       if (
         navigationMutationInFlight.current ||
-        !drawerSourceIsLive(expectedDrawerEpoch)
+        !drawerSourceIsLive(expectedDrawerEpoch, true)
       )
         return;
       navigationMutationInFlight.current = true;
@@ -4460,7 +4512,8 @@ export function HomeScreen({
   }, [presentSettingsSurface, rootSurfaceAdmissionAllowed]);
 
   const openSettingsFromDrawer = useCallback((expectedEpoch: number) => {
-    if (!drawerSourceIsLive(expectedEpoch)) return;
+    if (!drawerSourceIsLive(expectedEpoch, true)) return;
+    if (drawerRecoveryRouter.current?.(expectedEpoch) === true) return;
     presentSettingsSurface();
   }, [drawerSourceIsLive, presentSettingsSurface]);
 
@@ -4946,7 +4999,9 @@ export function HomeScreen({
         !projectsVisibleRef.current ||
         contextSheetVisibleRef.current ||
         lifecycleIntentRef.current !== null ||
-        directProjectMutationOutboxRef.current !== null ||
+        // A settled recovery outbox is handled below, by handing off to the
+        // recovery surface. Refusing it here made that branch unreachable and
+        // the control silent.
         store.getState().projectContextDestructiveTransition !== null
       )
         return;
@@ -5825,7 +5880,8 @@ export function HomeScreen({
     expectedEpoch: number,
     open: () => void,
   ) => {
-    if (!drawerSourceIsLive(expectedEpoch)) return;
+    if (!drawerSourceIsLive(expectedEpoch, true)) return;
+    if (drawerRecoveryRouter.current?.(expectedEpoch) === true) return;
     if (wideLayout) {
       closeDrawerSurface();
       open();
@@ -5927,6 +5983,33 @@ export function HomeScreen({
     }
     open?.();
   }, [lifecycleIntentIsLive, projectContextLifecycleController, store]);
+  drawerDismissHandoff.current = handleDrawerDismiss;
+
+  // The Drawer is admitted with rootSurfaceAdmissionAllowed(true), so it opens
+  // while a settled recovery waits. Its actions ask the strict guard, which
+  // refuses exactly that state. Rather than each one doing nothing and saying
+  // nothing, they take the person to the recovery the Drawer was opened over.
+  const routeDrawerActionToRecovery = useCallback(
+    (expectedDrawerEpoch: number) => {
+      if (!destructiveAuthorityActive() || destructiveAuthorityActive(true))
+        return false;
+      openPendingLifecycleFromDrawer(
+        lifecycleIntent,
+        lifecycleToken,
+        directProjectMutationView,
+        expectedDrawerEpoch,
+      );
+      return true;
+    },
+    [
+      destructiveAuthorityActive,
+      directProjectMutationView,
+      lifecycleIntent,
+      lifecycleToken,
+      openPendingLifecycleFromDrawer,
+    ],
+  );
+  drawerRecoveryRouter.current = routeDrawerActionToRecovery;
 
   const handleActionDismiss = useCallback(() => {
     const open = afterActionDismiss.current;
@@ -6355,7 +6438,8 @@ export function HomeScreen({
         onDismiss={handleDrawerDismiss}
         onNewChat={() => createConversation(drawerRenderEpoch)}
         onOpenAccount={() => {
-          if (!drawerSourceIsLive(drawerRenderEpoch)) return;
+          if (!drawerSourceIsLive(drawerRenderEpoch, true)) return;
+          if (routeDrawerActionToRecovery(drawerRenderEpoch)) return;
           setAccountVisible(true);
         }}
         onOpenConversationMenu={id =>
