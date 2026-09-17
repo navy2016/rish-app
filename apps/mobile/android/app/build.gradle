@@ -180,12 +180,18 @@ android {
     if (rishGuestEnabled || rishAgentCoreEnabled) {
         externalNativeBuild {
             cmake {
-                path file("src/main/cpp/CMakeLists.txt")
+                // src/main/jni is React Native's application CMake, which
+                // defines libappmodules.so; it pulls in src/main/cpp for the
+                // Rish JNI shims. Pointing straight at src/main/cpp built the
+                // shims and *not* libappmodules.so, and an app without it
+                // aborts on launch with no TurboModules registered.
+                path file("src/main/jni/CMakeLists.txt")
                 version "3.22.1"
             }
         }
         def cmakeArguments = ["-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"]
-        def cmakeTargets = []
+        // `appmodules` is React Native's own target and is always built.
+        def cmakeTargets = ["appmodules"]
         if (rishGuestEnabled) {
             cmakeArguments += "-DRISH_FFI_DIR=${rishFfiDir.absolutePath}".toString()
             cmakeTargets += "rish_guest_jni"

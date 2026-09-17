@@ -1203,6 +1203,42 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### The Android app could not launch, and the release build proved it
+
+`libappmodules.so` was not in the APK — neither release nor debug. It is the
+library React Native's New Architecture generates to register every TurboModule
+and Fabric component, and without it the app starts, fails
+`TurboModuleRegistry.getEnforcing('PlatformConstants')`, and **aborts**:
+
+```
+E ReactNativeJS: Invariant Violation: TurboModuleRegistry.getEnforcing(...):
+  'PlatformConstants' could not be found.
+F libc    : Fatal signal 6 (SIGABRT) ... (mqt_v_js)
+```
+
+**The cause was the CMake entry point.** `app/build.gradle` pointed
+`externalNativeBuild` at `src/main/cpp/CMakeLists.txt` — the Rish JNI shims —
+so Gradle built those two libraries and never React Native's `appmodules`
+target. `newArchEnabled=true` the whole time; nothing said so.
+
+The fix is a CMake file in `src/main/jni/` that includes
+`ReactNative-application.cmake` and pulls in `../cpp` for the shims, with
+`appmodules` added to the target list. **The directory matters:**
+`ReactNative-application.cmake` globs `*.cpp` next to itself and, finding any,
+uses those *instead of* its own `OnLoad.cpp` — so the shims have to stay in
+their own directory or they would silently replace React Native's entry point.
+
+**How it stayed hidden.** A debug build needs Metro, so a debug launch fails
+for that reason too and the two look alike; the four React-screen
+instrumentation tests were being reported as environmental. Only the release
+APK, which bundles its JS and needs no Metro, showed the real fault. A release
+build is not just packaging — it is the only configuration where that class of
+defect is visible.
+
+Verified after the fix: the release APK installs, launches, `MainActivity`
+reaches `ResumedActivity`, and the UI renders (`RISH · ON DEVICE`, `Choose
+workspace`). Before it, `am start` was followed by SIGABRT.
+
 ### Android operations are idempotent now
 
 `AndroidWorkspaceRegistry` had no notion of an operation id: a retry after a

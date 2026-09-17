@@ -1,5 +1,8 @@
+# Included from ../jni/CMakeLists.txt, which is the CMake entry point Gradle
+# builds. No `project()` here: the top-level project is `appmodules`, and
+# React Native's application setup uses CMAKE_PROJECT_NAME as its library name.
 cmake_minimum_required(VERSION 3.22.1)
-project(rish_jni LANGUAGES CXX)
+enable_language(CXX)
 
 # Both Rust libraries are staged as prebuilt cdylibs per ABI plus their
 # headers — the guest runtime by scripts/prepare-rish-android.sh, the agent
