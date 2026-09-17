@@ -81,7 +81,7 @@ jobs:
           RISH_ANDROID_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           cd android
-          ./gradlew assembleRelease -PreactNativeArchitectures=x86_64 -PrishStandalone=true
+          ./gradlew :app:assembleRelease -PreactNativeArchitectures=x86_64 -PrishStandalone=true
       - name: Assert appmodules and shims packaged
         run: |
           APK=android/app/build/outputs/apk/release/app-release.apk
@@ -89,7 +89,7 @@ jobs:
       - name: Build debug androidTest APK and run device acceptance
         run: |
           cd android
-          ./gradlew assembleDebug assembleDebugAndroidTest -PreactNativeArchitectures=x86_64 -PrishStandalone=true
+          ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest -PreactNativeArchitectures=x86_64 -PrishStandalone=true
       - name: Run workspace acceptance on the emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:

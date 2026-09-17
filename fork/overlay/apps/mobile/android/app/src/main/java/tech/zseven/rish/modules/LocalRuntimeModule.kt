@@ -2,7 +2,7 @@ package tech.zseven.rish.modules
 
 import android.app.AlertDialog
 import android.text.InputType
-import android.view.WindowManager
+import android.text.method.PasswordTransformationMethod
 import android.widget.EditText
 import com.facebook.react.bridge.*
 import tech.zseven.rish.runtime.*
@@ -10,6 +10,13 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
+// Secret entry (API keys, login codes) masks the field and does not block screen
+// capture: the owner decides what is safe to capture, and iOS never blocked it
+// here either. The masking carries that decision, so set it explicitly --
+// `isSingleLine = true` installs SingleLineTransformationMethod and silently
+// replaces the PasswordTransformationMethod that a password inputType had just
+// installed, so ordering alone decided whether the key showed in cleartext. It
+// did, on both prompts, until 2026-09-17.
 /** Native chat transport and encrypted credentials. Agent/project execution stays unavailable. */
 class LocalRuntimeModule(private val react: ReactApplicationContext) : ReactContextBaseJavaModule(react) {
     private val runtime = AndroidRuntimeState.get(react)
@@ -48,7 +55,9 @@ class LocalRuntimeModule(private val react: ReactApplicationContext) : ReactCont
                 val activity = react.currentActivity
                 if(activity == null || activity.isFinishing) { promise.reject("E_COMPLETION_NATIVE", "Active screen required"); return@runOnUiThread }
                 val chinese = locale == "zh-CN"
-                val field = EditText(activity).apply { inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD; isSingleLine = true
+                val field = EditText(activity).apply { isSingleLine = true
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    transformationMethod = PasswordTransformationMethod.getInstance()
                     if (android.os.Build.VERSION.SDK_INT >= 26) {
                         setAutofillHints(null)
                         importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
@@ -59,7 +68,6 @@ class LocalRuntimeModule(private val react: ReactApplicationContext) : ReactCont
                     .setPositiveButton(if(chinese) "保存" else "Save", null)
                     .setOnCancelListener { field.text.clear(); resolve(promise, JSONObject().put("status", "cancelled")) }.create()
                 dialog.setOnShowListener {
-                    dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                         val secret = field.text.toString().trim()
                         if(secret.isEmpty()) { field.error = if(chinese) "请输入密钥" else "Enter a key"; return@setOnClickListener }
@@ -107,8 +115,9 @@ class LocalRuntimeModule(private val react: ReactApplicationContext) : ReactCont
                 }
                 val chinese = locale == "zh-CN"
                 val field = EditText(activity).apply {
-                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
                     isSingleLine = true
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    transformationMethod = PasswordTransformationMethod.getInstance()
                     if (android.os.Build.VERSION.SDK_INT >= 26) {
                         setAutofillHints(null)
                         importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
@@ -128,7 +137,6 @@ class LocalRuntimeModule(private val react: ReactApplicationContext) : ReactCont
                         resolve(promise, JSONObject().put("status", "cancelled"))
                     }.create()
                 dialog.setOnShowListener {
-                    dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                         val code = field.text.toString().trim()
                         if (code.isEmpty()) {

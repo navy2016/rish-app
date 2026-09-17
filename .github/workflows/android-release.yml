@@ -90,7 +90,10 @@ jobs:
           RISH_ANDROID_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           cd android
-          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a -PrishStandalone=true
+          # :app scoped on purpose: a bare `assembleRelease` matches every
+          # subproject that has the task, which would also build upstream's
+          # unrelated :guestprobe APK (added upstream 2026-09-17).
+          ./gradlew :app:assembleRelease -PreactNativeArchitectures=arm64-v8a -PrishStandalone=true
       - name: Verify and rename APK
         run: |
           APK=android/app/build/outputs/apk/release/app-release.apk

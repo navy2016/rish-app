@@ -21,6 +21,14 @@ overlay mirrors the repository layout). There are no patches: upstream commit
 library in its own `src/main/jni` CMake entry, so the fork's CMake override and
 its small `android/app/build.gradle` patch were deleted.
 
+Gradle tasks are scoped to `:app:` (`:app:assembleRelease`, `:app:assembleDebug`,
+`:app:assembleDebugAndroidTest`). A bare `assembleRelease` matches **every**
+subproject that has the task — including upstream's unrelated `:guestprobe`
+probe APK (added upstream in `812fcb0`) — so the fork names the module it
+actually delivers. `:guestprobe` still gets *configured* (it throws at
+configuration time when no runtime is staged), which is why both workflows
+stage the guest runtime before any Gradle step.
+
 ## What the overlay contains
 
 | Path (under `fork/overlay/`) | Why |
