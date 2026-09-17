@@ -86,7 +86,7 @@ jobs:
         run: |
           APK=android/app/build/outputs/apk/release/app-release.apk
           unzip -l "$APK" | grep -E "libappmodules\.so|librish_ffi\.so|librish_guest_jni\.so"
-      - name: Build debug androidTest APK and run workspace acceptance
+      - name: Build debug androidTest APK and run device acceptance
         run: |
           cd android
           ./gradlew assembleDebug assembleDebugAndroidTest -PreactNativeArchitectures=x86_64 -PrishStandalone=true

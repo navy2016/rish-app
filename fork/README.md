@@ -25,11 +25,13 @@ its small `android/app/build.gradle` patch were deleted.
 
 | Path (under `fork/overlay/`) | Why |
 | --- | --- |
+| `apps/mobile/android/app/src/main/java/tech/zseven/rish/modules/LocalRuntimeModule.kt` | upstream lacks `bootstrapForHarness` (the JS runtime probe needs it for every non-dsh harness) and its rejections drop the HTTP status; the overlay adds both, no other behaviour change |
 | `apps/mobile/android/app/src/main/java/tech/zseven/rish/modules/LocalMirrorsModule.kt` | upstream still rejects every call; the fork stages the mirror overlay for real |
 | `.../modules/LocalWorkspaceModule.kt` | upstream placeholder; the fork serves file operations (list/read/write/mkdir/rename/trash/restore/portable tools) |
 | `.../modules/LocalWorkspacesModule.kt` | upstream placeholder; the fork registers workspaces and drives the system folder picker (SAF) |
 | `.../runtime/AndroidWorkspaceStore.kt` | the fork's workspace authority + storage layer used by the three modules above |
 | `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidWorkspaceStoreTest.kt` | device acceptance test run by the smoke workflow |
+| `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidRuntimeBootstrapTest.kt` | device acceptance test for the runtime probe (`bootstrapForHarness`) run by the smoke workflow |
 
 ## Syncing with upstream
 
