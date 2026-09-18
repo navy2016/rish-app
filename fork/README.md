@@ -59,10 +59,13 @@ choosing a folder outside the app stays refused (upstream has not built the
 Storage Access Framework side), and the Files surface resolves what a bind
 produced through the deleted module's replacement above.
 
-The smoke workflow's acceptance run also executes upstream's
-`AndroidRuntimeStoreTest` (session CAS persist/load/query — the chain the local
-chat persistence runs through) so a regression there fails the fork's build,
-not just upstream's never-run suite.
+The smoke workflow's acceptance run executes nineteen classes / 98 tests as of
+`c1bceb5`: the fork's workspace, runtime-probe, bridge and transport-reply
+suites plus upstream's native suites (session CAS persist/load/query — the
+chain the local chat persistence runs through — core bindings, workspace
+registry, prepared attempts, agent journals/WAL, tool registry/rules/batch/
+execution, transport tools, root resolver), so a regression in any of them
+fails the fork's build, not just upstream's never-run suite.
 
 ## Syncing with upstream
 
