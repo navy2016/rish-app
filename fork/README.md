@@ -38,6 +38,12 @@ stage the guest runtime before any Gradle step.
 | `.../modules/LocalWorkspaceModule.kt` | upstream placeholder; the fork serves bounded file operations (list/read/write/mkdir/rename/trash/restore/portable tools) over the shared registry's proven root, with a fallback to folders the fork imported before the registry existed |
 | `.../runtime/AndroidWorkspaceStore.kt` | the fork's file-operation engine; it also answers records the fork created before the shared registry existed |
 | `scripts/prepare-rish-agent-core-android.sh` | upstream hardcodes arm64-v8a; the overlay accepts `RISH_ANDROID_ABIS=x86_64` (same contract as `prepare-rish-android.sh`) so the smoke emulator stages a core and its session acceptance runs against the real core |
+| `.../modules/LocalWorkspacesModule.kt` | upstream refuses folder picking; the overlay drives the Storage Access Framework picker and **imports**: the picked tree is copied into a new owned workspace (bounded: 20000 entries / 1 GiB), which binds and runs like any other. Regrant/forget/delete still refuse. |
+| `.../runtime/AndroidProviderConfiguration.kt` | dsh becomes a configurable harness: a custom service (endpoint, protocol, auth, mappings) may be saved for it like codex/claude-code, and `CUSTOM_PROVIDER_dsh_` accounts re-prompt per profile |
+| `.../runtime/AndroidCredentialStore.kt` | accepts `CUSTOM_PROVIDER_dsh_<sha256>` account names |
+| `.../runtime/AndroidSessionEnvironment.kt` | supplies `provider_bindings` answers (canonical keyed by the core's own canonicalisation) so a session whose receipts carry a custom-service binding can be judged and persisted; upstream returned an empty list, which refused every such session |
+| `apps/mobile/src/providers/configuration.ts` | `ConfigurableHarness` (and binding parsing) includes dsh |
+| `apps/mobile/src/components/ProviderConfigurationCard.tsx` | the custom-service card is offered for dsh too (mapping list = the bundled dsh models) |
 | `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidWorkspaceStoreTest.kt` | device acceptance test run by the smoke workflow |
 | `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidRuntimeBootstrapTest.kt` | device acceptance test for the runtime probe (`bootstrapForHarness`) run by the smoke workflow |
 | `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidWorkspaceBridgeTest.kt` | device acceptance test for the registry→store file bridge run by the smoke workflow |
