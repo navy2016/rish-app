@@ -1,42 +1,18 @@
 #import "HarnessAuthService.h"
 #import "ClaudeOfficialSession.h"
-#import "DSHGuestRuntimeState.h"
-#import "LocalGuestModule.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
 #include <limits.h>
 #include <stdio.h>
-#include "rish.h"
 
-typedef void (*DSHAuthOutputCallback)(void *context, const char *event,
-                                      size_t length);
-extern "C" char *rish_vm_session_exec_stream_json(
-    void *session, const char *input, size_t input_len, void *context,
-    DSHAuthOutputCallback callback) __attribute__((weak_import));
 NSString *const DSHHarnessAuthHarnessCodex = @"codex";
 NSString *const DSHHarnessAuthHarnessClaudeCode = @"claude-code";
 
 static NSString *const DSHHarnessAuthManifestName = @"HarnessAuthAssets";
 
-/// The official Codex CLI release the guest installs. A fixed version rather
-/// than "latest": what the guest runs is then the same thing every time and can
-/// be reviewed, and a moved tag cannot change it underneath a login.
-static NSString *const DSHHarnessAuthCodexVersion = @"0.153.4";
-static NSString *const DSHHarnessAuthCodexReleaseURL =
-    @"https://github.com/openai/codex/releases/download/rust-v0.153.4/"
-    @"codex-x86_64-unknown-linux-musl.tar.gz";
-
-/// Where the CLI installed in the guest lives between logins. The guest's root
-/// image is digest-verified and read-only, so anything installed at run time
-/// has to be written to a disk of its own or it goes with the session.
-static NSString *const DSHHarnessAuthDataDiskName = @"harness-cli.img";
-/// 512 MiB sparse: large enough for a CLI and its dependencies, and it costs
-/// only what is written because the file system keeps the holes.
-static unsigned long long const DSHHarnessAuthDataDiskBytes = 512ULL * 1024 * 1024;
 static NSString *const DSHHarnessAuthKeychainService =
     @"tech.zseven.rish.harness-subscription-auth";
-static NSUInteger const DSHHarnessAuthMaximumCredentialBytes = 256 * 1024;
 static NSUInteger const DSHHarnessAuthMaxOutputBytes = 64 * 1024;
 BOOL DSHCodexChatUsesSubscription(void) {
   static DSHHarnessAuthService *reader;
@@ -51,9 +27,6 @@ static NSString *const DSHCodexChatAPIKey = @"api_key";
 static NSString *const DSHCodexOAuthTokenURL = @"https://auth.openai.com/oauth/token";
 static NSString *const DSHCodexOAuthClientID = @"app_EMoamEEZ73f0CkXaXp7hrann";
 
-static BOOL DSHAuthStreamFFIAvailable(void) {
-  return rish_vm_session_exec_stream_json != NULL;
-}
 
 static NSDictionary *DSHAuthRuntime(BOOL available, NSString *version,
                                     NSString *reason) {
@@ -125,62 +98,6 @@ static NSString *DSHAuthSHA256File(NSURL *url) {
     [hex appendFormat:@"%02x", digest[index]];
   }
   return hex;
-}
-
-/// The guest the login runs in is the one the app already ships and pins: the
-/// same kernel and initramfs every other guest here boots from. Nothing
-/// harness-specific is bundled any more, because the CLI is installed inside
-/// the guest at run time rather than shipped with the app.
-static NSDictionary *DSHAuthSharedGuestAssets(NSBundle *bundle) {
-  NSURL *kernel = [bundle URLForResource:DSHGuestKernelResourceName withExtension:nil];
-  NSURL *initrd = [bundle URLForResource:DSHGuestInitramfsResourceName withExtension:nil];
-  if (kernel == nil || initrd == nil) return nil;
-  // The digests are pinned beside the resources; a mismatch means the bundle
-  // is not the one that was reviewed, which is never something to boot.
-  if (![DSHAuthSHA256File(kernel) isEqualToString:DSHGuestKernelSha256] ||
-      ![DSHAuthSHA256File(initrd) isEqualToString:DSHGuestInitramfsSha256]) {
-    return nil;
-  }
-  return @{ @"kernel_url": kernel, @"initrd_url": initrd };
-}
-
-/// The disk the guest keeps its installed CLI on, created sparse on first use.
-/// Returns nil only when it cannot be created, which makes the harness report
-/// unavailable rather than booting a guest with nowhere to install to.
-static NSURL *DSHAuthDataDiskURL(void) {
-  NSFileManager *files = NSFileManager.defaultManager;
-  NSURL *support = [files URLsForDirectory:NSApplicationSupportDirectory
-                                 inDomains:NSUserDomainMask].firstObject;
-  if (support == nil) return nil;
-  NSURL *directory = [support URLByAppendingPathComponent:@"harness-auth" isDirectory:YES];
-  if (![files createDirectoryAtURL:directory withIntermediateDirectories:YES
-                        attributes:@{NSFileProtectionKey: NSFileProtectionComplete}
-                             error:nil]) {
-    return nil;
-  }
-  NSURL *disk = [directory URLByAppendingPathComponent:DSHHarnessAuthDataDiskName];
-  NSDictionary *attributes = [files attributesOfItemAtPath:disk.path error:nil];
-  if ([attributes[NSFileType] isEqual:NSFileTypeRegular]) {
-    // A disk whose length drifted is not one the guest can mount; start over
-    // rather than hand the block device a truncated image.
-    if ([attributes[NSFileSize] unsignedLongLongValue] == DSHHarnessAuthDataDiskBytes) {
-      return disk;
-    }
-    [files removeItemAtURL:disk error:nil];
-  }
-  if (![files createFileAtPath:disk.path contents:nil
-                    attributes:@{NSFileProtectionKey: NSFileProtectionComplete}]) {
-    return nil;
-  }
-  NSFileHandle *handle = [NSFileHandle fileHandleForWritingToURL:disk error:nil];
-  if (handle == nil) return nil;
-  BOOL sized = [handle truncateAtOffset:DSHHarnessAuthDataDiskBytes error:nil];
-  [handle closeAndReturnError:nil];
-  if (!sized) {
-    [files removeItemAtURL:disk error:nil];
-    return nil;
-  }
-  return disk;
 }
 
 static NSDictionary *DSHAuthManifestForBundle(NSBundle *bundle) {
@@ -427,13 +344,6 @@ static BOOL DSHAuthValidSessionId(id value) {
 - (void)completeCodexRefresh:(NSDictionary *)credential errorCode:(NSString *)errorCode;
 @end
 
-static void DSHAuthStreamEvent(void *context, const char *event,
-                               size_t length) {
-  if (context == NULL || event == NULL || length == 0 || length > 256 * 1024) return;
-  DSHHarnessAuthService *service = (__bridge DSHHarnessAuthService *)context;
-  [service receiveStreamEvent:event length:length];
-}
-
 @implementation DSHHarnessAuthService
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
@@ -671,28 +581,14 @@ static void DSHAuthStreamEvent(void *context, const char *event,
     if (runner != nil) return runner.status;
   }
   if (!DSHAuthSupportedHarness(harnessId)) return @{};
-  // Nothing harness-specific is bundled. The login boots the guest the app
-  // already ships and installs the official CLI inside it, so what has to be
-  // true is the shared assets, somewhere to install to, and a linked FFI.
-  BOOL available = YES;
-  NSString *reason = nil;
-  if (DSHAuthSharedGuestAssets(self.bundle) == nil) {
-    available = NO;
-    reason = @"guest-assets-unavailable";
-  } else if (!DSHAuthStreamFFIAvailable()) {
-    available = NO;
-    reason = @"patched-stream-ffi-not-linked";
-  } else if (DSHAuthDataDiskURL() == nil) {
-    available = NO;
-    reason = @"cli-storage-unavailable";
-  }
-  if (![harnessId isEqualToString:DSHHarnessAuthHarnessCodex]) {
-    available = NO;
-    reason = @"claude-original-auth-transport-unavailable";
-  }
+  // Codex sign-in is a host-side OAuth device flow over HTTPS -- no guest, no
+  // bundled CLI -- so nothing has to be present for it to run. Claude Code
+  // still has no wired transport.
+  BOOL available = [harnessId isEqualToString:DSHHarnessAuthHarnessCodex];
+  NSString *reason = available ? nil : @"claude-original-auth-transport-unavailable";
   NSMutableDictionary *status = DSHAuthBaseStatus(
       harnessId,
-      DSHAuthRuntime(available, available ? DSHHarnessAuthCodexVersion : nil, reason));
+      DSHAuthRuntime(available, nil, reason));
   if (available) {
     NSString *activeSession = nil;
     NSString *activeURL = nil;
@@ -885,33 +781,6 @@ static BOOL DSHAuthStoreCredential(NSString *harnessId, NSData *data) {
   return status == errSecSuccess;
 }
 
-static NSDictionary *DSHAuthExecResponse(void *session,
-                                         NSArray<NSString *> *command) {
-  NSData *encoded = [NSJSONSerialization dataWithJSONObject:@{ @"command": command }
-                                                            options:0 error:nil];
-  if (encoded == nil) return nil;
-  char *raw = rish_vm_session_exec_json(session, (const char *)encoded.bytes, encoded.length);
-  if (raw == NULL) return nil;
-  NSString *text = [NSString stringWithUTF8String:raw];
-  rish_string_free(raw);
-  if (text.length == 0 || text.length > 1024 * 1024) return nil;
-  return [NSJSONSerialization JSONObjectWithData:
-      [text dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
-}
-
-static NSData *DSHAuthDecodeCredentialResponse(NSDictionary *response) {
-  if (![response[@"ok"] boolValue] || [response[@"exit_code"] integerValue] != 0) return nil;
-  NSString *encoded = [response[@"stdout"] isKindOfClass:NSString.class]
-      ? response[@"stdout"] : nil;
-  if (encoded.length == 0 || encoded.length > 512 * 1024) return nil;
-  encoded = [[encoded componentsSeparatedByCharactersInSet:
-      [NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsJoinedByString:@""];
-  NSData *data = [[NSData alloc] initWithBase64EncodedString:encoded options:0];
-  if (data.length == 0 || data.length > DSHHarnessAuthMaximumCredentialBytes) return nil;
-  NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-  return [json isKindOfClass:NSDictionary.class] ? data : nil;
-}
-
 static NSDictionary *DSHAuthStatusForActiveLogin(NSString *harnessId,
                                                  NSString *sessionId,
                                                  NSString *url,
@@ -934,87 +803,6 @@ static NSDictionary *DSHAuthStatusForActiveLogin(NSString *harnessId,
     @"expires_at": @((NSInteger)expiresAt.timeIntervalSince1970),
   };
   return status;
-}
-
-static BOOL DSHAuthWriteAll(NSOutputStream *output, const uint8_t *bytes,
-                            NSUInteger length) {
-  NSUInteger offset = 0;
-  while (offset < length) {
-    NSInteger count = [output write:bytes + offset maxLength:length - offset];
-    if (count <= 0) return NO;
-    offset += (NSUInteger)count;
-  }
-  return YES;
-}
-
-static BOOL DSHAuthWriteNewcEntry(NSOutputStream *output, uint32_t inode,
-                                  uint32_t mode, NSString *name,
-                                  NSData *data) {
-  NSData *nameData = [name dataUsingEncoding:NSUTF8StringEncoding];
-  if (nameData.length == 0 || nameData.length > UINT32_MAX - 1 ||
-      data.length > UINT32_MAX) return NO;
-  uint32_t fields[] = {inode, mode, 0, 0, 1, 0, (uint32_t)data.length,
-                       0, 0, 0, 0, (uint32_t)nameData.length + 1, 0};
-  NSMutableData *header = [NSMutableData dataWithCapacity:110];
-  [header appendBytes:"070701" length:6];
-  for (uint32_t field : fields) {
-    char part[9];
-    snprintf(part, sizeof(part), "%08x", field);
-    [header appendBytes:part length:8];
-  }
-  if (!DSHAuthWriteAll(output, (const uint8_t *)header.bytes, header.length) ||
-      !DSHAuthWriteAll(output, (const uint8_t *)nameData.bytes, nameData.length) ||
-      !DSHAuthWriteAll(output, (const uint8_t *)"\0", 1)) return NO;
-  NSUInteger headerLength = header.length + nameData.length + 1;
-  uint8_t zeroes[4] = {0, 0, 0, 0};
-  NSUInteger namePadding = (4 - (headerLength % 4)) % 4;
-  if (namePadding > 0 && !DSHAuthWriteAll(output, zeroes, namePadding)) return NO;
-  if (data.length > 0 && !DSHAuthWriteAll(output, (const uint8_t *)data.bytes, data.length)) return NO;
-  NSUInteger dataPadding = (4 - (data.length % 4)) % 4;
-  return dataPadding == 0 || DSHAuthWriteAll(output, zeroes, dataPadding);
-}
-
-static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
-                                          NSError **error) {
-  if (baseURL == nil || credential.length == 0 ||
-      credential.length > DSHHarnessAuthMaximumCredentialBytes) return nil;
-  NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
-      [NSString stringWithFormat:@"rish-auth-initrd-%@.cpio", NSUUID.UUID.UUIDString]];
-  NSURL *outputURL = [NSURL fileURLWithPath:path];
-  [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
-  NSOutputStream *output = [NSOutputStream outputStreamWithURL:outputURL append:NO];
-  NSInputStream *input = [NSInputStream inputStreamWithURL:baseURL];
-  [output open];
-  [input open];
-  uint8_t buffer[64 * 1024];
-  BOOL ok = YES;
-  while (input.hasBytesAvailable) {
-    NSInteger count = [input read:buffer maxLength:sizeof(buffer)];
-    if (count <= 0 || !DSHAuthWriteAll(output, buffer, (NSUInteger)count)) { ok = NO; break; }
-  }
-  NSArray *directories = @[ @"tmp", @"tmp/rish-auth-home", @"tmp/rish-auth-home/.codex" ];
-  uint32_t inode = 1;
-  if (ok) for (NSString *directory in directories) {
-    ok = DSHAuthWriteNewcEntry(output, inode++, 0040755, directory, [NSData data]);
-    if (!ok) break;
-  }
-  if (ok) ok = DSHAuthWriteNewcEntry(output, inode++, 0100600,
-      @"tmp/rish-auth-home/.codex/auth.json", credential);
-  if (ok) ok = DSHAuthWriteNewcEntry(output, inode++, 0, @"TRAILER!!!", [NSData data]);
-  [input close];
-  [output close];
-  if (!ok) {
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    if (error != NULL) *error = [NSError errorWithDomain:DSHHarnessAuthKeychainService
-                                                     code:1 userInfo:@{
-      NSLocalizedDescriptionKey: @"Unable to build protected auth initrd overlay" }];
-    return nil;
-  }
-  [[NSFileManager defaultManager] setAttributes:@{
-    NSFileProtectionKey: NSFileProtectionComplete,
-    NSFilePosixPermissions: @0600,
-  } ofItemAtPath:path error:nil];
-  return outputURL;
 }
 
 - (void)finishAsync:(void (^)(NSDictionary *))completion
@@ -1181,156 +969,162 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
 }
 
 - (void)runCodexLoginForSession:(NSString *)sessionId generation:(NSUInteger)generation {
-  NSDictionary *asset = DSHAuthSharedGuestAssets(self.bundle);
-  NSURL *dataDisk = asset == nil ? nil : DSHAuthDataDiskURL();
-  if (asset == nil || dataDisk == nil || !DSHAuthStreamFFIAvailable()) {
+  // The device-code exchange is plain HTTPS -- the same shape the token
+  // refresh below already speaks -- so it runs on the host. It used to boot a
+  // guest only to run the CLI's copy of this flow, which meant installing a
+  // 98 MB binary on an emulated core before a single request could go out.
+  // The endpoints are the CLI's own: auth.openai.com device authorization,
+  // polling, and the OAuth token exchange with PKCE.
+  // PKCE: a random verifier and its S256 challenge, as the CLI does.
+  uint8_t verifierBytes[32];
+  if (SecRandomCopyBytes(kSecRandomDefault, sizeof(verifierBytes), verifierBytes) != errSecSuccess) {
+    [self finishCodexLoginWithGeneration:generation response:nil];
+    return;
+  }
+  NSString *verifier = [[[NSData dataWithBytes:verifierBytes length:sizeof(verifierBytes)]
+      base64EncodedStringWithOptions:0] stringByReplacingOccurrencesOfString:@"+" withString:@"-"];
+  verifier = [[verifier stringByReplacingOccurrencesOfString:@"/" withString:@"_"]
+      stringByReplacingOccurrencesOfString:@"=" withString:@""];
+  uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+  NSData *verifierData = [verifier dataUsingEncoding:NSUTF8StringEncoding];
+  CC_SHA256(verifierData.bytes, (CC_LONG)verifierData.length, digest);
+  NSString *challenge = [[[NSData dataWithBytes:digest length:sizeof(digest)]
+      base64EncodedStringWithOptions:0] stringByReplacingOccurrencesOfString:@"+" withString:@"-"];
+  challenge = [[challenge stringByReplacingOccurrencesOfString:@"/" withString:@"_"]
+      stringByReplacingOccurrencesOfString:@"=" withString:@""];
+
+  // Step 1: ask for a device auth id and the user code.
+  NSDictionary *usercode = [self codexAuthPOST:@"/api/accounts/deviceauth/usercode"
+                                          json:@{ @"client_id": DSHCodexOAuthClientID }
+                                     generation:generation session:sessionId];
+  NSString *deviceAuthId = [usercode[@"device_auth_id"] isKindOfClass:NSString.class] ? usercode[@"device_auth_id"] : nil;
+  NSString *userCode = [usercode[@"user_code"] isKindOfClass:NSString.class] ? usercode[@"user_code"] : nil;
+  NSInteger interval = [usercode[@"interval"] isKindOfClass:NSNumber.class] ? MAX(1, [usercode[@"interval"] integerValue]) : 5;
+  if (deviceAuthId.length == 0 || userCode.length == 0) {
+    [self finishCodexLoginWithGeneration:generation response:nil];
+    return;
+  }
+  @synchronized (self) {
+    if (self.generation != generation || ![self.activeSessionId isEqualToString:sessionId]) return;
+    self.activeUserCode = userCode;
+    self.activePhase = @"waiting_for_browser";
+  }
+
+  // Step 2: poll until the person approves, up to fifteen minutes.
+  NSString *authorizationCode = nil;
+  NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:900];
+  while ([deadline timeIntervalSinceNow] > 0) {
+    @synchronized (self) {
+      if (self.generation != generation || ![self.activeSessionId isEqualToString:sessionId]) return;
+    }
+    [NSThread sleepForTimeInterval:interval];
+    NSDictionary *poll = [self codexAuthPOST:@"/api/accounts/deviceauth/token"
+                                        json:@{ @"device_auth_id": deviceAuthId, @"user_code": userCode }
+                                   generation:generation session:sessionId];
+    id code = poll[@"authorization_code"];
+    if ([code isKindOfClass:NSString.class] && [code length] > 0) { authorizationCode = code; break; }
+  }
+  if (authorizationCode.length == 0) {
     @synchronized (self) {
       if (self.generation == generation && [self.activeSessionId isEqualToString:sessionId]) {
-        self.activeErrorCode = @"E_HARNESS_AUTH_RUNTIME_UNAVAILABLE";
+        self.activeErrorCode = @"E_HARNESS_AUTH_TIMED_OUT";
         self.lastErrorCode = self.activeErrorCode;
-        self.activeSessionId = nil;
-      }
-    }
-    return;
-  }
-  OSStatus storedStatus = errSecSuccess;
-  NSData *storedCredential = DSHAuthStoredCredential(
-      DSHHarnessAuthHarnessCodex, &storedStatus);
-  NSDictionary *storedJSON = storedCredential == nil ? nil :
-      [NSJSONSerialization JSONObjectWithData:storedCredential options:0 error:nil];
-  if (storedStatus != errSecItemNotFound &&
-      (storedStatus != errSecSuccess || ![storedJSON isKindOfClass:NSDictionary.class])) {
-    [self finishCodexLoginWithGeneration:generation response:nil];
-    return;
-  }
-  NSError *overlayError = nil;
-  NSURL *overlayURL = storedCredential == nil ? nil :
-      DSHAuthInitrdWithCredential(asset[@"initrd_url"], storedCredential, &overlayError);
-  if (storedCredential != nil && overlayURL == nil) {
-    [self finishCodexLoginWithGeneration:generation response:nil];
-    return;
-  }
-  NSDictionary *request = @{
-    @"kernel_path": [asset[@"kernel_url"] path],
-    @"initrd_path": [(overlayURL ?: asset[@"initrd_url"]) path],
-    // Where the CLI installed below survives to the next login. Without it the
-    // guest would reinstall on every attempt.
-    @"data_disk_path": dataDisk.path,
-    // The shipped FFI deserializes the shared run-request schema even for
-    // boot-only sessions. Its command field is required but is not executed.
-    @"command": @[],
-    @"memory_mib": @1024,
-    @"network": @"user-nat",
-    @"command_line": @"console=ttyS0,115200n8 rdinit=/init panic=-1 oops=panic nokaslr cgroup_no_v1=all 8250.nr_uarts=1",
-    @"boot_budget_units": @60000000000ULL,
-    @"handshake_budget_units": @40000000000ULL,
-  };
-  NSData *encoded = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
-  DSHGuestVMOwner *owner = [DSHGuestRuntimeState.sharedState acquireGuestOwner];
-  if (!owner) {
-    if (overlayURL) [NSFileManager.defaultManager removeItemAtURL:overlayURL error:nil];
-    @synchronized (self) {
-      if (self.generation == generation && [self.activeSessionId isEqual:sessionId]) {
-        self.activeErrorCode = @"E_GUEST_BUSY"; self.lastErrorCode = self.activeErrorCode;
-        self.activeSessionId = nil;
-      }
-    }
-    return;
-  }
-  void *session = NULL;
-  @try {
-  session = encoded == nil ? NULL : rish_vm_boot_session((const char *)encoded.bytes, encoded.length);
-  if (overlayURL != nil) [[NSFileManager defaultManager] removeItemAtURL:overlayURL error:nil];
-  if (session == NULL) {
-    [self finishCodexLoginWithGeneration:generation response:nil];
-    return;
-  }
-  [DSHGuestRuntimeState.sharedState setGuestRuntimeMounted:YES owner:owner];
-  @synchronized (self) {
-    if (self.generation != generation || ![self.activeSessionId isEqualToString:sessionId]) {
-      return;
-    }
-  }
-  char *raw = NULL;
-  @synchronized (self) { self.streamGeneration = generation; }
-  NSString *home = @"/tmp/rish-auth-home";
-  // The CLI is the official release, downloaded in the guest and kept on the
-  // data disk. The disk is raw rather than a file system: the guest has no
-  // mkfs, and a tar stream needs neither. An empty disk simply extracts
-  // nothing, which is how a first login tells itself to install.
-  NSString *script = [NSString stringWithFormat:
-      @"set -e; umask 077; mkdir -p %@ /opt/harness;"
-      @" tar -xf /dev/vdb -C /opt/harness 2>/dev/null || true;"
-      @" if [ ! -x /opt/harness/codex ]; then"
-      @"   wget -qO /tmp/codex.tgz '%@' || exit 69;"
-      @"   tar -xzf /tmp/codex.tgz -C /opt/harness;"
-      @"   mv -f /opt/harness/codex-* /opt/harness/codex 2>/dev/null || true;"
-      @"   chmod 0755 /opt/harness/codex;"
-      @"   tar -cf /dev/vdb -C /opt/harness .;"
-      @" fi;"
-      @" export HOME=%@;"
-      @" exec timeout 600 /opt/harness/codex login --device-auth",
-      home, DSHHarnessAuthCodexReleaseURL, home];
-  NSArray *command = @[ @"sh", @"-lc", script ];
-  NSData *commandData = [NSJSONSerialization dataWithJSONObject:@{ @"command": command }
-                                                                  options:0 error:nil];
-  raw = commandData == nil ? NULL : rish_vm_session_exec_stream_json(
-      session, (const char *)commandData.bytes, commandData.length, (__bridge void *)self,
-      DSHAuthStreamEvent);
-  NSDictionary *loginResponse = nil;
-  if (raw != NULL) {
-    NSString *text = [NSString stringWithUTF8String:raw];
-    rish_string_free(raw);
-    if (text.length <= 1024 * 1024) {
-      loginResponse = [NSJSONSerialization JSONObjectWithData:
-          [text dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
-    }
-  }
-  if (![loginResponse[@"ok"] boolValue] || [loginResponse[@"exit_code"] integerValue] != 0) {
-    // The install and the sign-in are one command, so without this they fail
-    // as the same thing. A guest that could not fetch the CLI is a different
-    // problem from a sign-in that was refused, and only one of them is about
-    // the person's account. 69 is the exit the install step reserves.
-    if ([loginResponse[@"exit_code"] integerValue] == 69) {
-      @synchronized (self) {
-        if (self.generation == generation &&
-            [self.activeSessionId isEqualToString:sessionId]) {
-          self.activeErrorCode = @"E_HARNESS_AUTH_CLI_DOWNLOAD_FAILED";
-          self.lastErrorCode = self.activeErrorCode;
-        }
       }
     }
     [self finishCodexLoginWithGeneration:generation response:nil];
     return;
   }
   @synchronized (self) { if (self.generation == generation) self.activePhase = @"verifying"; }
-  NSDictionary *statusResponse = DSHAuthExecResponse(
-      session, @[ @"sh", @"-lc",
-        @"export HOME=/tmp/rish-auth-home; exec /opt/harness/codex login status" ]);
-  NSDictionary *credentialResponse = DSHAuthExecResponse(session, @[
-    @"sh", @"-lc", [NSString stringWithFormat:
-      @"base64 /tmp/rish-auth-home/.codex/auth.json | tr -d '\\n'" ]
-  ]);
-  NSData *credential = DSHAuthDecodeCredentialResponse(credentialResponse);
-  BOOL statusOK = [statusResponse[@"ok"] boolValue] &&
-      [statusResponse[@"exit_code"] integerValue] == 0;
+
+  // Step 3: exchange the authorization code for tokens with the PKCE verifier.
+  NSMutableCharacterSet *formAllowed = [[NSCharacterSet alphanumericCharacterSet] mutableCopy];
+  [formAllowed addCharactersInString:@"-._*"];
+  NSString *(^enc)(NSString *) = ^(NSString *value) {
+    return [value stringByAddingPercentEncodingWithAllowedCharacters:formAllowed] ?: @"";
+  };
+  NSString *redirect = @"https://auth.openai.com/deviceauth/callback";
+  NSString *body = [NSString stringWithFormat:
+      @"grant_type=authorization_code&client_id=%@&code=%@&redirect_uri=%@&code_verifier=%@",
+      DSHCodexOAuthClientID, enc(authorizationCode), enc(redirect), enc(verifier)];
+  NSDictionary *tokens = [self codexTokenExchange:body generation:generation session:sessionId];
+  NSString *access = [tokens[@"access_token"] isKindOfClass:NSString.class] ? tokens[@"access_token"] : nil;
+  if (access.length == 0) {
+    [self finishCodexLoginWithGeneration:generation response:nil];
+    return;
+  }
+
+  // Persist in the auth.json shape the rest of this file already reads.
+  NSMutableDictionary *tokenBlock = [@{ @"access_token": access } mutableCopy];
+  if ([tokens[@"refresh_token"] isKindOfClass:NSString.class]) tokenBlock[@"refresh_token"] = tokens[@"refresh_token"];
+  if ([tokens[@"id_token"] isKindOfClass:NSString.class]) tokenBlock[@"id_token"] = tokens[@"id_token"];
+  NSDictionary *authJSON = @{ @"OPENAI_API_KEY": [NSNull null], @"tokens": tokenBlock,
+      @"last_refresh": [[[NSISO8601DateFormatter alloc] init] stringFromDate:[NSDate date]] };
+  if ([DSHHarnessAuthService codexChatCredentialFromAuthJSON:authJSON] == nil) {
+    [self finishCodexLoginWithGeneration:generation response:nil];
+    return;
+  }
+  NSData *encoded = [NSJSONSerialization dataWithJSONObject:authJSON options:0 error:nil];
   BOOL committed = NO;
-  // The generation check and Keychain write share this lock. A cancellation
-  // or logout cannot race a late VM result into a newly-cleared identity.
   @synchronized (self) {
-    if (statusOK && credential != nil && self.generation == generation &&
+    if (encoded.length > 0 && self.generation == generation &&
         [self.activeSessionId isEqualToString:sessionId]) {
-      committed = DSHAuthStoreCredential(DSHHarnessAuthHarnessCodex, credential);
+      committed = DSHAuthStoreCredential(DSHHarnessAuthHarnessCodex, encoded);
     }
   }
   [self finishCodexLoginWithGeneration:generation response:committed ? @{} : nil];
-  } @catch (__unused NSException *exception) {
-    [self finishCodexLoginWithGeneration:generation response:nil];
-  } @finally {
-    if (session) rish_vm_session_free(session);
-    if (overlayURL) [NSFileManager.defaultManager removeItemAtURL:overlayURL error:nil];
-    [DSHGuestRuntimeState.sharedState releaseGuestOwner:owner];
-  }
+}
+
+/// One synchronous JSON POST to the OpenAI auth API, returning the parsed
+/// object or nil. Bounded response, host-checked, TLS validated by the system.
+- (NSDictionary *)codexAuthPOST:(NSString *)path
+                           json:(NSDictionary *)payload
+                     generation:(NSUInteger)generation
+                        session:(NSString *)sessionId {
+  NSURL *url = [NSURL URLWithString:[@"https://auth.openai.com" stringByAppendingString:path]];
+  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+  request.HTTPMethod = @"POST";
+  request.timeoutInterval = 20;
+  [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+  request.HTTPBody = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+  if (request.HTTPBody == nil) return nil;
+  return [self codexSynchronousJSON:request generation:generation session:sessionId];
+}
+
+/// The form-encoded token exchange, kept separate because its content type and
+/// body differ from the JSON device-code calls.
+- (NSDictionary *)codexTokenExchange:(NSString *)body
+                          generation:(NSUInteger)generation
+                             session:(NSString *)sessionId {
+  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:DSHCodexOAuthTokenURL]];
+  request.HTTPMethod = @"POST";
+  request.timeoutInterval = 20;
+  [request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+  request.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+  NSDictionary *response = [self codexSynchronousJSON:request generation:generation session:sessionId];
+  return [response[@"tokens"] isKindOfClass:NSDictionary.class] ? response[@"tokens"] : response;
+}
+
+- (NSDictionary *)codexSynchronousJSON:(NSURLRequest *)request
+                            generation:(NSUInteger)generation
+                               session:(NSString *)sessionId {
+  NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+  configuration.timeoutIntervalForRequest = 20;
+  configuration.timeoutIntervalForResource = 25;
+  NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  __block NSDictionary *result = nil;
+  [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+    if (error == nil && http != nil && http.statusCode >= 200 && http.statusCode < 300 &&
+        data.length > 0 && data.length <= 128 * 1024) {
+      id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+      if ([object isKindOfClass:NSDictionary.class]) result = object;
+    }
+    dispatch_semaphore_signal(done);
+  }] resume];
+  dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)));
+  [session finishTasksAndInvalidate];
+  return result;
 }
 
 - (void)finishCodexLoginWithGeneration:(NSUInteger)generation
