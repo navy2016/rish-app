@@ -1,6 +1,7 @@
 #import "HarnessAuthService.h"
 #import "ClaudeOfficialSession.h"
 #import "DSHGuestRuntimeState.h"
+#import "LocalGuestModule.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
@@ -17,6 +18,22 @@ NSString *const DSHHarnessAuthHarnessCodex = @"codex";
 NSString *const DSHHarnessAuthHarnessClaudeCode = @"claude-code";
 
 static NSString *const DSHHarnessAuthManifestName = @"HarnessAuthAssets";
+
+/// The official Codex CLI release the guest installs. A fixed version rather
+/// than "latest": what the guest runs is then the same thing every time and can
+/// be reviewed, and a moved tag cannot change it underneath a login.
+static NSString *const DSHHarnessAuthCodexVersion = @"0.153.4";
+static NSString *const DSHHarnessAuthCodexReleaseURL =
+    @"https://github.com/openai/codex/releases/download/rust-v0.153.4/"
+    @"codex-x86_64-unknown-linux-musl.tar.gz";
+
+/// Where the CLI installed in the guest lives between logins. The guest's root
+/// image is digest-verified and read-only, so anything installed at run time
+/// has to be written to a disk of its own or it goes with the session.
+static NSString *const DSHHarnessAuthDataDiskName = @"harness-cli.img";
+/// 512 MiB sparse: large enough for a CLI and its dependencies, and it costs
+/// only what is written because the file system keeps the holes.
+static unsigned long long const DSHHarnessAuthDataDiskBytes = 512ULL * 1024 * 1024;
 static NSString *const DSHHarnessAuthKeychainService =
     @"tech.zseven.rish.harness-subscription-auth";
 static NSUInteger const DSHHarnessAuthMaximumCredentialBytes = 256 * 1024;
@@ -108,6 +125,62 @@ static NSString *DSHAuthSHA256File(NSURL *url) {
     [hex appendFormat:@"%02x", digest[index]];
   }
   return hex;
+}
+
+/// The guest the login runs in is the one the app already ships and pins: the
+/// same kernel and initramfs every other guest here boots from. Nothing
+/// harness-specific is bundled any more, because the CLI is installed inside
+/// the guest at run time rather than shipped with the app.
+static NSDictionary *DSHAuthSharedGuestAssets(NSBundle *bundle) {
+  NSURL *kernel = [bundle URLForResource:DSHGuestKernelResourceName withExtension:nil];
+  NSURL *initrd = [bundle URLForResource:DSHGuestInitramfsResourceName withExtension:nil];
+  if (kernel == nil || initrd == nil) return nil;
+  // The digests are pinned beside the resources; a mismatch means the bundle
+  // is not the one that was reviewed, which is never something to boot.
+  if (![DSHAuthSHA256File(kernel) isEqualToString:DSHGuestKernelSha256] ||
+      ![DSHAuthSHA256File(initrd) isEqualToString:DSHGuestInitramfsSha256]) {
+    return nil;
+  }
+  return @{ @"kernel_url": kernel, @"initrd_url": initrd };
+}
+
+/// The disk the guest keeps its installed CLI on, created sparse on first use.
+/// Returns nil only when it cannot be created, which makes the harness report
+/// unavailable rather than booting a guest with nowhere to install to.
+static NSURL *DSHAuthDataDiskURL(void) {
+  NSFileManager *files = NSFileManager.defaultManager;
+  NSURL *support = [files URLsForDirectory:NSApplicationSupportDirectory
+                                 inDomains:NSUserDomainMask].firstObject;
+  if (support == nil) return nil;
+  NSURL *directory = [support URLByAppendingPathComponent:@"harness-auth" isDirectory:YES];
+  if (![files createDirectoryAtURL:directory withIntermediateDirectories:YES
+                        attributes:@{NSFileProtectionKey: NSFileProtectionComplete}
+                             error:nil]) {
+    return nil;
+  }
+  NSURL *disk = [directory URLByAppendingPathComponent:DSHHarnessAuthDataDiskName];
+  NSDictionary *attributes = [files attributesOfItemAtPath:disk.path error:nil];
+  if ([attributes[NSFileType] isEqual:NSFileTypeRegular]) {
+    // A disk whose length drifted is not one the guest can mount; start over
+    // rather than hand the block device a truncated image.
+    if ([attributes[NSFileSize] unsignedLongLongValue] == DSHHarnessAuthDataDiskBytes) {
+      return disk;
+    }
+    [files removeItemAtURL:disk error:nil];
+  }
+  if (![files createFileAtPath:disk.path contents:nil
+                    attributes:@{NSFileProtectionKey: NSFileProtectionComplete}]) {
+    return nil;
+  }
+  NSFileHandle *handle = [NSFileHandle fileHandleForWritingToURL:disk error:nil];
+  if (handle == nil) return nil;
+  BOOL sized = [handle truncateAtOffset:DSHHarnessAuthDataDiskBytes error:nil];
+  [handle closeAndReturnError:nil];
+  if (!sized) {
+    [files removeItemAtURL:disk error:nil];
+    return nil;
+  }
+  return disk;
 }
 
 static NSDictionary *DSHAuthManifestForBundle(NSBundle *bundle) {
@@ -598,34 +671,28 @@ static void DSHAuthStreamEvent(void *context, const char *event,
     if (runner != nil) return runner.status;
   }
   if (!DSHAuthSupportedHarness(harnessId)) return @{};
-  NSDictionary *manifest = DSHAuthManifestForBundle(self.bundle);
-  if (manifest == nil) {
-    return DSHAuthBaseStatus(harnessId, DSHAuthRuntime(NO, nil,
-        @"official-cli-assets-not-packaged"));
-  }
-  if (![manifest[@"harnesses"][harnessId] isKindOfClass:NSDictionary.class]) {
-    return DSHAuthBaseStatus(harnessId, DSHAuthRuntime(NO, nil,
-        [harnessId isEqualToString:DSHHarnessAuthHarnessClaudeCode]
-            ? @"claude-original-auth-transport-unavailable"
-            : @"official-cli-assets-not-packaged"));
-  }
-  NSDictionary *asset = DSHAuthAssetInfo(self.bundle, harnessId, manifest);
-  BOOL available = [asset[@"available"] boolValue];
-  NSString *reason = [asset[@"reason"] isKindOfClass:NSString.class]
-      ? asset[@"reason"] : nil;
-  // A verified CLI file is only one input. This checkout has neither the
-  // network-capable auth guest image nor a linked stream/credential-readback
-  // FFI, so it must never advertise an executable auth runtime.
-  if (available && !DSHAuthStreamFFIAvailable()) {
+  // Nothing harness-specific is bundled. The login boots the guest the app
+  // already ships and installs the official CLI inside it, so what has to be
+  // true is the shared assets, somewhere to install to, and a linked FFI.
+  BOOL available = YES;
+  NSString *reason = nil;
+  if (DSHAuthSharedGuestAssets(self.bundle) == nil) {
+    available = NO;
+    reason = @"guest-assets-unavailable";
+  } else if (!DSHAuthStreamFFIAvailable()) {
     available = NO;
     reason = @"patched-stream-ffi-not-linked";
+  } else if (DSHAuthDataDiskURL() == nil) {
+    available = NO;
+    reason = @"cli-storage-unavailable";
   }
   if (![harnessId isEqualToString:DSHHarnessAuthHarnessCodex]) {
     available = NO;
     reason = @"claude-original-auth-transport-unavailable";
   }
   NSMutableDictionary *status = DSHAuthBaseStatus(
-      harnessId, DSHAuthRuntime(available, asset[@"version"], reason));
+      harnessId,
+      DSHAuthRuntime(available, available ? DSHHarnessAuthCodexVersion : nil, reason));
   if (available) {
     NSString *activeSession = nil;
     NSString *activeURL = nil;
@@ -1114,10 +1181,9 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
 }
 
 - (void)runCodexLoginForSession:(NSString *)sessionId generation:(NSUInteger)generation {
-  NSDictionary *manifest = DSHAuthManifestForBundle(self.bundle);
-  NSDictionary *asset = manifest == nil ? nil : DSHAuthAssetInfo(
-      self.bundle, DSHHarnessAuthHarnessCodex, manifest);
-  if (![asset[@"available"] boolValue] || !DSHAuthStreamFFIAvailable()) {
+  NSDictionary *asset = DSHAuthSharedGuestAssets(self.bundle);
+  NSURL *dataDisk = asset == nil ? nil : DSHAuthDataDiskURL();
+  if (asset == nil || dataDisk == nil || !DSHAuthStreamFFIAvailable()) {
     @synchronized (self) {
       if (self.generation == generation && [self.activeSessionId isEqualToString:sessionId]) {
         self.activeErrorCode = @"E_HARNESS_AUTH_RUNTIME_UNAVAILABLE";
@@ -1147,6 +1213,9 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
   NSDictionary *request = @{
     @"kernel_path": [asset[@"kernel_url"] path],
     @"initrd_path": [(overlayURL ?: asset[@"initrd_url"]) path],
+    // Where the CLI installed below survives to the next login. Without it the
+    // guest would reinstall on every attempt.
+    @"data_disk_path": dataDisk.path,
     // The shipped FFI deserializes the shared run-request schema even for
     // boot-only sessions. Its command field is required but is not executed.
     @"command": @[],
@@ -1185,10 +1254,24 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
   char *raw = NULL;
   @synchronized (self) { self.streamGeneration = generation; }
   NSString *home = @"/tmp/rish-auth-home";
-  NSArray *command = @[ @"sh", @"-lc",
-    [NSString stringWithFormat:
-      @"umask 077; mkdir -p %@; export HOME=%@; exec timeout 600 /opt/harness/codex login --device-auth",
-      home, home] ];
+  // The CLI is the official release, downloaded in the guest and kept on the
+  // data disk. The disk is raw rather than a file system: the guest has no
+  // mkfs, and a tar stream needs neither. An empty disk simply extracts
+  // nothing, which is how a first login tells itself to install.
+  NSString *script = [NSString stringWithFormat:
+      @"set -e; umask 077; mkdir -p %@ /opt/harness;"
+      @" tar -xf /dev/vdb -C /opt/harness 2>/dev/null || true;"
+      @" if [ ! -x /opt/harness/codex ]; then"
+      @"   wget -qO /tmp/codex.tgz '%@' || exit 69;"
+      @"   tar -xzf /tmp/codex.tgz -C /opt/harness;"
+      @"   mv -f /opt/harness/codex-* /opt/harness/codex 2>/dev/null || true;"
+      @"   chmod 0755 /opt/harness/codex;"
+      @"   tar -cf /dev/vdb -C /opt/harness .;"
+      @" fi;"
+      @" export HOME=%@;"
+      @" exec timeout 600 /opt/harness/codex login --device-auth",
+      home, DSHHarnessAuthCodexReleaseURL, home];
+  NSArray *command = @[ @"sh", @"-lc", script ];
   NSData *commandData = [NSJSONSerialization dataWithJSONObject:@{ @"command": command }
                                                                   options:0 error:nil];
   raw = commandData == nil ? NULL : rish_vm_session_exec_stream_json(
@@ -1204,6 +1287,19 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
     }
   }
   if (![loginResponse[@"ok"] boolValue] || [loginResponse[@"exit_code"] integerValue] != 0) {
+    // The install and the sign-in are one command, so without this they fail
+    // as the same thing. A guest that could not fetch the CLI is a different
+    // problem from a sign-in that was refused, and only one of them is about
+    // the person's account. 69 is the exit the install step reserves.
+    if ([loginResponse[@"exit_code"] integerValue] == 69) {
+      @synchronized (self) {
+        if (self.generation == generation &&
+            [self.activeSessionId isEqualToString:sessionId]) {
+          self.activeErrorCode = @"E_HARNESS_AUTH_CLI_DOWNLOAD_FAILED";
+          self.lastErrorCode = self.activeErrorCode;
+        }
+      }
+    }
     [self finishCodexLoginWithGeneration:generation response:nil];
     return;
   }

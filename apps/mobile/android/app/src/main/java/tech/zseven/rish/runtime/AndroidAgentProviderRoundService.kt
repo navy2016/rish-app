@@ -19,17 +19,15 @@ import org.json.JSONObject
  * journal records are all the core's; calling the provider and writing the
  * row are this file's.
  *
- * **Two things are not here, and neither is hidden.** iOS streams a round and
- * shows text as it arrives; this waits for the whole reply. And the model is
- * shown no tools: `AndroidModelTransport` refuses any request carrying them
- * with `E_COMPLETION_CONTEXT_UNSUPPORTED`, because no provider's tool-call
- * wire format is written for this platform yet. A round therefore runs, is
- * claimed, dispatched, journalled and settled -- and comes back with an
- * assistant message and no calls to make. The batch below it has nothing to
- * prepare until that transport speaks tools.
+ * **Streaming is not here.** iOS shows a round's text as it arrives; this
+ * waits for the whole reply. A round still completes and its calls are still
+ * journalled; the only thing missing is watching it happen.
  *
- * That is stated here rather than worked around: a round that quietly dropped
- * the tools it was given would look like a model that chose not to act.
+ * Tools do travel, on the chat-completions protocol. What the model is shown
+ * is the registry's description of each tool the root carries, and what comes
+ * back is read by the core: turning untrusted model output into calls is
+ * `completion_response`'s rule, and the transport carries the provider's reply
+ * for it rather than reading it here.
  */
 internal class AndroidAgentProviderRoundService(
     private val sessions: AndroidSessionStore,
@@ -111,10 +109,23 @@ internal class AndroidAgentProviderRoundService(
                 .put("messages", state.optJSONArray("transcripts") ?: JSONArray()),
         ).optJSONArray("messages") ?: JSONArray()
 
-        // The registry is asked even though nothing is sent: a root whose
-        // toolset the registry refuses is a conflict before the provider is
-        // called, and that check is real whether or not the tools travel.
-        tools.registryForRoot(root ?: JSONObject())
+        // What the model is shown. The registry decides which tools a root
+        // carries and what each one is; the core turns a descriptor into the
+        // description a model sees, so neither this file nor the transport
+        // invents anything a tool can be asked to do.
+        val registry = tools.registryForRoot(root ?: JSONObject())
+        val declared = JSONArray()
+        val names = registry.optJSONArray("tools") ?: JSONArray()
+        for (index in 0 until names.length()) {
+            val name = names.optJSONObject(index)?.optString("name")
+                ?: names.optString(index).takeIf { it.isNotEmpty() }
+                ?: continue
+            val described = decide(
+                JSONObject().put("op", "tool_description")
+                    .put("descriptor", tools.descriptorForTool(name, root ?: JSONObject())),
+            ).optJSONObject("description")
+            if (described != null) declared.put(described)
+        }
 
         val reply = try {
             val envelope = JSONObject()
@@ -129,15 +140,24 @@ internal class AndroidAgentProviderRoundService(
                 .put("visible_history", body)
                 .put("round_transcript", JSONArray())
                 .put("project_context", JSONObject.NULL)
-                // Empty, and the transport refuses anything else. See the note
-                // on the class.
-                .put("tools", JSONArray())
+                .put("tools", declared)
             transport.execute(transport.prepare(envelope.toString()))
         } catch (_: Exception) {
             null
         }
 
-        val status = if (reply == null) "failed_retryable" else "completed"
+        // Untrusted model output becomes calls here, by the core's rule and
+        // not by reading fields off a provider's JSON in Kotlin.
+        val parsed = if (reply == null) null else RishAgentCoreNative.completionResponseReduce(
+            JSONObject().put("op", "parse").put("response", reply)
+                .put("requested_model", request.optString("model"))
+                .put("model_supported", true)
+                .put("thinking_mode", request.optString("thinking_mode", "off"))
+                .put("fallback_call_id", request.optString("round_id"))
+                .toString(),
+        )?.let { JSONObject(it) }?.takeIf { it.optBoolean("ok") }
+
+        val status = if (reply == null || parsed == null) "failed_retryable" else "completed"
         val failure = decide(
             JSONObject().put("op", "round_failure_code").put("status", status),
         ).optString("failure_code", "")
@@ -148,7 +168,7 @@ internal class AndroidAgentProviderRoundService(
         ).optJSONObject("cas") ?: throw Refused(CONFLICT)
         val patch = JSONObject().put("status", status)
             .put("failure_code", if (failure.isEmpty()) JSONObject.NULL else failure)
-            .put("reply", reply ?: JSONObject.NULL)
+            .put("reply", parsed?.opt("parsed") ?: JSONObject.NULL)
         rounds.complete(completeCas, patch) ?: throw Refused(PERSISTENCE)
 
         val settled = rowFor(wal.snapshot(), locator) ?: throw Refused(CONFLICT)

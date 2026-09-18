@@ -41,7 +41,11 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
         val id = input.getString(if(schema == 2) "round_id" else "request_id")
         if (!RuntimeJson.uuid(id)) fail("E_COMPLETION_IDENTIFIER")
         if (input.getString("thinking_mode") !in setOf("off", "high", "max")) fail("E_COMPLETION_THINKING")
-        if (input.optJSONArray("tools")?.length() != 0) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
+        // Tools travel now. Bounded here rather than trusted: the round decides
+        // which tools exist, and this only refuses a list no provider would
+        // accept anyway.
+        val toolCount = input.optJSONArray("tools")?.length() ?: 0
+        if (toolCount > 64) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
         if (schema == 2) {
             if (!input.isNull("project_context") || input.getJSONArray("round_transcript").length() != 0) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
             if (!RuntimeJson.uuid(input.getString("turn_id")) || !RuntimeJson.uuid(input.getString("attempt_id"))) fail("E_COMPLETION_IDENTIFIER")
@@ -83,6 +87,36 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
         if (request.revision != revision || request.account != configurations.effectiveAccount(AndroidProviderConfiguration.slot(request.harness))) fail("E_COMPLETION_CREDENTIAL_CHANGED")
         if (request.cancelled) fail("E_COMPLETION_CANCELLED")
     }
+    /**
+     * A tool as the chat-completions protocol spells one. The name, the
+     * description and the schema are the registry's; the wrapper around them
+     * is this protocol's, and that is the only part this file decides.
+     */
+    /**
+     * The chat-completions wrapper, reachable from a test. It is the one part
+     * of a tool's trip to the model this platform decides, and the two lines
+     * that used to refuse tools entirely are the reason it is worth seeing
+     * directly rather than only through a network call.
+     */
+    internal fun functionToolsForTest(declared: JSONArray): JSONArray = functionTools(declared)
+
+    private fun functionTools(declared: JSONArray): JSONArray {
+        val tools = JSONArray()
+        for (index in 0 until declared.length()) {
+            val tool = declared.optJSONObject(index) ?: continue
+            tools.put(
+                JSONObject().put("type", "function").put(
+                    "function",
+                    JSONObject()
+                        .put("name", tool.optString("name"))
+                        .put("description", tool.optString("description"))
+                        .put("parameters", tool.opt("parameters") ?: JSONObject()),
+                ),
+            )
+        }
+        return tools
+    }
+
     fun execute(request: Prepared): JSONObject {
         val started = android.os.SystemClock.elapsedRealtime()
         try {
@@ -99,6 +133,7 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
             }
             val config = request.configuration
             val protocol = config.getString("protocol")
+            val declared = input.optJSONArray("tools") ?: JSONArray()
             val wireModel = config.getJSONObject("model_mappings").optString(request.model, request.model)
             val body = JSONObject().put("model", wireModel).put("stream", false)
             when(protocol) {
@@ -113,6 +148,7 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                 }
                 "chat-completions" -> {
                     body.put("messages", messages).put("max_tokens", 8192)
+                    if (declared.length() > 0) body.put("tools", functionTools(declared))
                     if(config.getBoolean("send_reasoning")) {
                         body.put("thinking", JSONObject().put("type", if(input.getString("thinking_mode") == "off") "disabled" else "enabled"))
                         if(input.getString("thinking_mode") != "off") body.put("reasoning_effort", input.getString("thinking_mode"))
@@ -166,7 +202,10 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                 "chat-completions" -> {
                     val choice = response.getJSONArray("choices").getJSONObject(0)
                     val message = choice.getJSONObject("message")
-                    if((message.optJSONArray("tool_calls")?.length() ?: 0) != 0) fail("E_COMPLETION_TOOL_CALL_INVALID")
+                    // Tool calls are no longer refused. They are not read here
+                    // either: turning untrusted model output into calls is the
+                    // core's rule (`completion_response`), and this carries the
+                    // provider's own reply back for it to read.
                     text = stringOrEmpty(message, "content"); reasoning = stringOrEmpty(message, "reasoning_content")
                     finish = choice.getString("finish_reason")
                 }
