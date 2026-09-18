@@ -42,6 +42,7 @@ stage the guest runtime before any Gradle step.
 | `.../runtime/AndroidProviderConfiguration.kt` | dsh becomes a configurable harness: a custom service (endpoint, protocol, auth, mappings) may be saved for it like codex/claude-code, and `CUSTOM_PROVIDER_dsh_` accounts re-prompt per profile |
 | `.../runtime/AndroidCredentialStore.kt` | accepts `CUSTOM_PROVIDER_dsh_<sha256>` account names |
 | `.../runtime/AndroidSessionEnvironment.kt` | supplies `provider_bindings` answers (canonical keyed by the core's own canonicalisation) so a session whose receipts carry a custom-service binding can be judged and persisted; upstream returned an empty list, which refused every such session |
+| `.../runtime/AndroidModelTransport.kt` | upstream refuses a chat reply that carries tool calls (blank `content` it calls `E_COMPLETION_EMPTY_RESPONSE`, finish `tool_calls` it calls `E_COMPLETION_FINISH_RELATION`); the overlay accepts a tool-call reply as the successful round it is, and leaves its parsing to the core |
 | `apps/mobile/src/providers/configuration.ts` | `ConfigurableHarness` (and binding parsing) includes dsh |
 | `apps/mobile/src/components/ProviderConfigurationCard.tsx` | the custom-service card is offered for dsh too (mapping list = the bundled dsh models) |
 | `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidWorkspaceStoreTest.kt` | device acceptance test run by the smoke workflow |
@@ -75,3 +76,20 @@ No conflicts should appear: upstream files are byte-identical to upstream.
 The overlay is copied only in CI checkouts, so a merge never touches it. If
 upstream implements one of the bridges above, delete the corresponding overlay
 file instead of rebasing anything.
+
+## Android agent round: upstream work in progress (traced 2026-09-18)
+
+A workspace-bound chat takes the agent path. On Android that path is
+half-built upstream, and every gap below is reachable from an ordinary send.
+The fork fixes the first (the transport, small and unambiguous) and leaves the
+rest to upstream rather than forking a large half-written surface:
+
+| Step | Verified state |
+| --- | --- |
+| `AndroidModelTransport.execute` | **fixed in the fork**: a reply carrying tool calls was refused as `E_COMPLETION_EMPTY_RESPONSE` (its `content` is null) or `E_COMPLETION_FINISH_RELATION` (its finish reason is `tool_calls`) — the second of the two lines that kept the agent path shut |
+| `AndroidAgentProviderRoundService.completeRound` | never inserts the round row (iOS calls `createAgentRoundV3` first), so the round stops at `rowFor(...) == null` with `E_AGENT_CONFLICT`; it also hands `completion_response` the transport's reduced result rather than the provider's reply, and calls `round_failure_code` with `status` where the core wants `kind`/`state` |
+| `AndroidAgentRoundJournal` | `claim` passes `{cas, owner}` where the core wants `{locator, expected_row_revision, owner}`; `complete` passes `{cas, patch}` where the core wants `{locator, cas, messages, receipt, terminal_kind, calls, root}`; `reconcile` passes `expected_cas` where the core wants `cas` |
+
+Until those land, a workspace-bound send settles as `E_AGENT_CONFLICT`; the
+Files surface and the binding itself are unaffected, and unbound chats take the
+legacy path as before.
