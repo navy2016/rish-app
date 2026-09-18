@@ -22,6 +22,12 @@ export type HarnessAuthStatus = {
     expires_at?: number;
     can_submit_code?: boolean;
   };
+  /** CLI install state; the card offers the download button and shows progress. */
+  install?: {
+    phase: 'idle' | 'downloading' | 'ready' | 'failed';
+    fraction?: number;
+    error_code?: string;
+  };
   error_code?: string;
 };
 

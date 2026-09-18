@@ -21,6 +21,7 @@ export type CodexChatSource = {
 type NativeHarnessAuth = {
   harnessAuthStatus?: (harnessId: HarnessSubscriptionId) => Promise<unknown>;
   startHarnessLogin?: (harnessId: HarnessSubscriptionId) => Promise<unknown>;
+  installHarnessCli?: (harnessId: HarnessSubscriptionId) => Promise<unknown>;
   cancelHarnessLogin?: (
     harnessId: HarnessSubscriptionId,
     sessionId: string,
@@ -107,6 +108,16 @@ function parse(value: unknown, expected: HarnessSubscriptionId): HarnessAuthStat
   const safe: HarnessAuthStatus = { schema_version: 1, harness_id: expected, runtime: { kind: 'official-cli', available: runtimeItem.available } as HarnessAuthStatus['runtime'], status: status as HarnessAuthStatus['status'], auth_method: item.auth_method as HarnessAuthStatus['auth_method'] };
   if (typeof runtimeItem.version === 'string') safe.runtime.version = runtimeItem.version.slice(0, 128);
   if (typeof runtimeItem.reason === 'string') safe.runtime.reason = runtimeItem.reason.slice(0, 500);
+  const install = item.install;
+  if (typeof install === 'object' && install !== null && !Array.isArray(install)) {
+    const i = install as Record<string, unknown>;
+    const phases = ['idle', 'downloading', 'ready', 'failed'] as const;
+    if (phases.includes(i.phase as typeof phases[number])) {
+      safe.install = { phase: i.phase as NonNullable<HarnessAuthStatus['install']>['phase'] };
+      if (typeof i.fraction === 'number' && i.fraction >= 0 && i.fraction <= 1) safe.install.fraction = i.fraction;
+      if (typeof i.error_code === 'string') safe.install.error_code = i.error_code.slice(0, 200);
+    }
+  }
   const account = item.account;
   if (typeof account === 'object' && account !== null && !Array.isArray(account) && typeof (account as Record<string, unknown>).label === 'string') {
     const a = account as Record<string, unknown>; safe.account = { label: (a.label as string).slice(0, 200) }; if (typeof a.plan === 'string') safe.account.plan = a.plan.slice(0, 100);
@@ -139,6 +150,12 @@ export async function startHarnessLogin(id: HarnessSubscriptionId) {
   const fn = native()?.startHarnessLogin;
   if (typeof fn !== 'function') return unavailable(id);
   try { return parse(await fn(id), id); } catch { return unavailable(id, 'E_AUTH_START'); }
+}
+
+export async function installHarnessCli(id: HarnessSubscriptionId) {
+  const fn = native()?.installHarnessCli;
+  if (typeof fn !== 'function') return unavailable(id);
+  try { return parse(await fn(id), id); } catch { return unavailable(id, 'E_AUTH_INSTALL'); }
 }
 
 export async function cancelHarnessLogin(id: HarnessSubscriptionId, sessionId: string) {

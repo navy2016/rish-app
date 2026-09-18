@@ -29,6 +29,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// {session_id, phase starting|waiting_for_browser|verifying, verification_url
 /// (optional), can_submit_code, expires_at (epoch seconds)}.
 @property (nonatomic, readonly, copy) NSDictionary *status;
+/// The host-downloaded CLI binary, delivered to the guest as a data disk and
+/// installed into the persistent home disk on first boot. Set before use.
+@property (nonatomic, copy, nullable) NSURL *cliDeliveryURL;
 /// Scheduling hint only. Never grants signed-in status without CLI verification.
 @property (nonatomic, readonly) BOOL shouldRestoreSavedSession;
 

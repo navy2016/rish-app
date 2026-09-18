@@ -26,6 +26,9 @@ FOUNDATION_EXPORT BOOL DSHCodexChatUsesSubscription(void);
 
 /// Returns the bounded status envelope described by the LocalRuntime bridge.
 - (NSDictionary *)statusForHarnessId:(NSString *)harnessId;
+/// Starts a host-side download of the harness CLI if it is not already present
+/// or in flight. Progress is reported through statusForHarnessId's install field.
+- (void)installCliForHarness:(NSString *)harnessId;
 - (void)readStatusForHarnessId:(NSString *)harnessId completion:(void (^)(NSDictionary *status))completion;
 
 /// Starts only an explicitly supported official CLI login. The current app

@@ -13,7 +13,7 @@ extern "C" char *rish_vm_session_control_json(void *session,
     __attribute__((weak_import));
 
 static NSString *const DSHClaudeHarnessId = @"claude-code";
-static NSString *const DSHClaudeGuestBinary = @"/opt/harness/claude";
+static NSString *const DSHClaudeGuestBinary = @"/mnt/claude/cli/claude";
 static NSString *const DSHClaudeGuestMountPoint = @"/mnt/claude";
 static NSString *const DSHClaudeGuestHome = @"/mnt/claude/home";
 static NSString *const DSHClaudeGuestConfig = @"/mnt/claude/home/.claude";
@@ -647,6 +647,9 @@ static BOOL DSHClaudeValidSessionId(id value) {
     @"kernel_path": self.kernelURL.path,
     @"initrd_path": self.initrdURL.path,
     @"root_disk_path": diskURL.path,
+    // The host-downloaded CLI, delivered raw. The guest installs it from
+    // /dev/vdb into the persistent home disk on first boot and reuses it after.
+    @"data_disk_path": self.cliDeliveryURL.path ?: diskURL.path,
     @"memory_mib": @1024,
     @"network": @"user-nat",
     @"command": @[],
@@ -704,8 +707,18 @@ static BOOL DSHClaudeValidSessionId(id value) {
   }
   NSDictionary *mount = [self runGuestCommand:@[
     @"sh", @"-lc",
-    [NSString stringWithFormat:@"ip link set lo up && mkdir -p %@ && mount -t vfat -o sync,fmask=0177,dmask=0077 /dev/vda %@ && mkdir -p %@",
-                               DSHClaudeGuestMountPoint, DSHClaudeGuestMountPoint, DSHClaudeGuestHome],
+    // umask=0022 mounts the home disk exec so the installed CLI runs in place.
+    // The CLI (a raw binary on /dev/vdb) is copied into the persistent cli/ dir
+    // once; every later boot finds it there and skips the copy.
+    [NSString stringWithFormat:
+        @"set -e; ip link set lo up; mkdir -p %@;"
+        @" mount -t vfat -o sync,umask=0022 /dev/vda %@;"
+        @" mkdir -p %@ %@/cli;"
+        @" if [ ! -x %@ ]; then dd if=/dev/vdb of=%@ bs=1M 2>/dev/null; chmod 0755 %@; fi;"
+        @" test -x %@",
+        DSHClaudeGuestMountPoint, DSHClaudeGuestMountPoint, DSHClaudeGuestHome,
+        DSHClaudeGuestMountPoint, DSHClaudeGuestBinary, DSHClaudeGuestBinary,
+        DSHClaudeGuestBinary, DSHClaudeGuestBinary],
   ]
                                               env:@{}
                                       attachStdin:NO

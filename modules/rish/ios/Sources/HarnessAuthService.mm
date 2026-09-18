@@ -1,13 +1,33 @@
 #import "HarnessAuthService.h"
 #import "ClaudeOfficialSession.h"
+#import "DSHGuestRuntimeState.h"
+#import "LocalGuestModule.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
+#include "rish.h"
 #include <limits.h>
 #include <stdio.h>
 
 NSString *const DSHHarnessAuthHarnessCodex = @"codex";
 NSString *const DSHHarnessAuthHarnessClaudeCode = @"claude-code";
+
+// Both subscriptions run their official CLI in the guest -- Claude's token is
+// rejected everywhere but the CLI, and Codex is routed the same way for one
+// architecture. The CLIs are native musl binaries downloaded on the host, once,
+// to Application Support; the guest installs them from there and reuses them.
+static NSString *const DSHCodexCliVersion = @"0.153.4";
+static NSString *const DSHCodexCliURL =
+    @"https://github.com/openai/codex/releases/download/rust-v0.153.4/"
+    @"codex-x86_64-unknown-linux-musl.tar.gz";
+static NSString *const DSHCodexCliFile = @"codex-cli.tar.gz";
+static NSString *const DSHClaudeCliVersion = @"2.1.276";
+static NSString *const DSHClaudeCliURL =
+    @"https://downloads.claude.ai/claude-code-releases/2.1.276/linux-x64-musl/claude";
+static NSString *const DSHClaudeCliFile = @"claude-cli.bin";
+// A download that stops short of this is treated as truncated; the exact size
+// is checked after the transfer, not trusted from Content-Length mid-flight.
+static unsigned long long const DSHCliMinimumBytes = 1024 * 1024;
 
 static NSString *const DSHHarnessAuthManifestName = @"HarnessAuthAssets";
 
@@ -335,6 +355,11 @@ static BOOL DSHAuthValidSessionId(id value) {
 @property(nonatomic, copy) NSString *activePhase;
 @property(nonatomic) BOOL codexRefreshInFlight;
 @property(nonatomic, strong) NSMutableArray *codexRefreshWaiters;
+// CLI install state, keyed by harness id. Each value is a mutable dictionary
+// with phase (idle|downloading|ready|failed), fraction (0..1) and error_code.
+// Read under @synchronized(self); surfaced through statusForHarnessId.
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSMutableDictionary *> *installState;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSURLSessionDownloadTask *> *installTasks;
 - (DSHClaudeOfficialSession *)validatedClaudeSession;
 - (void)receiveStreamEvent:(const char *)event length:(size_t)length;
 - (void)runCodexLoginForSession:(NSString *)sessionId generation:(NSUInteger)generation;
@@ -365,6 +390,8 @@ static BOOL DSHAuthValidSessionId(id value) {
                                              DISPATCH_QUEUE_SERIAL,
                                              QOS_CLASS_USER_INITIATED, 0));
     _codexRefreshWaiters = [NSMutableArray array];
+    _installState = [NSMutableDictionary dictionary];
+    _installTasks = [NSMutableDictionary dictionary];
   }
   return self;
 }
@@ -519,15 +546,19 @@ static BOOL DSHAuthValidSessionId(id value) {
 - (DSHClaudeOfficialSession *)validatedClaudeSession {
   @synchronized (self) {
     if (self.cachedClaudeSession != nil) return self.cachedClaudeSession;
-    NSDictionary *manifest = DSHAuthManifestForBundle(self.bundle);
-    if (![manifest[@"harnesses"][@"claude-code"] isKindOfClass:NSDictionary.class]) return nil;
-    NSDictionary *asset = DSHAuthAssetInfo(self.bundle, @"claude-code", manifest);
-    if (![asset[@"available"] boolValue]) return nil;
+    // Claude runs its CLI in the guest, installed from the host download. The
+    // session exists only once the shared guest assets, a home disk and the
+    // downloaded CLI are all present; until then the card shows the install
+    // button (statusForHarnessId supplies the install snapshot).
+    NSDictionary *assets = DSHAuthSharedGuestAssets(self.bundle);
+    NSURL *cli = [DSHHarnessAuthService installedCliURLForHarness:DSHHarnessAuthHarnessClaudeCode];
     NSURL *support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    if (assets == nil || cli == nil || support == nil) return nil;
     self.cachedClaudeSession = [[DSHClaudeOfficialSession alloc]
-        initWithKernelURL:asset[@"kernel_url"] initrdURL:asset[@"initrd_url"]
+        initWithKernelURL:assets[@"kernel_url"] initrdURL:assets[@"initrd_url"]
         storageDirectory:[support URLByAppendingPathComponent:@"official-claude" isDirectory:YES]
-        version:asset[@"version"]];
+        version:DSHClaudeCliVersion];
+    self.cachedClaudeSession.cliDeliveryURL = cli;
     if (self.cachedClaudeSession.shouldRestoreSavedSession) {
       self.claudeRestorePending = YES;
       [self.cachedClaudeSession refresh:^(__unused NSDictionary *status) {
@@ -575,15 +606,172 @@ static BOOL DSHAuthValidSessionId(id value) {
   [self finishAsync:completion status:[self statusForHarnessId:harnessId]];
 }
 
+#pragma mark CLI install (host-side download)
+
+/// The URL, filename and pinned version for a harness's CLI, or nil for an
+/// unknown harness.
++ (NSDictionary *)cliDescriptorForHarness:(NSString *)harnessId {
+  if ([harnessId isEqualToString:DSHHarnessAuthHarnessCodex]) {
+    return @{ @"url": DSHCodexCliURL, @"file": DSHCodexCliFile, @"version": DSHCodexCliVersion };
+  }
+  if ([harnessId isEqualToString:DSHHarnessAuthHarnessClaudeCode]) {
+    return @{ @"url": DSHClaudeCliURL, @"file": DSHClaudeCliFile, @"version": DSHClaudeCliVersion };
+  }
+  return nil;
+}
+
+/// Application Support/harness-cli, created on demand, excluded from backup.
++ (NSURL *)cliDirectory {
+  NSURL *support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory
+                                                        inDomains:NSUserDomainMask].firstObject;
+  if (support == nil) return nil;
+  NSURL *directory = [support URLByAppendingPathComponent:@"harness-cli" isDirectory:YES];
+  if (![NSFileManager.defaultManager createDirectoryAtURL:directory
+                              withIntermediateDirectories:YES
+                                               attributes:@{NSFileProtectionKey: NSFileProtectionComplete}
+                                                    error:nil]) {
+    return nil;
+  }
+  [directory setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+  return directory;
+}
+
+/// The on-disk CLI download for a harness, or nil if it is not present at its
+/// full expected size. A short file is a partial transfer and never counted.
++ (NSURL *)installedCliURLForHarness:(NSString *)harnessId {
+  NSDictionary *descriptor = [self cliDescriptorForHarness:harnessId];
+  NSURL *directory = [self cliDirectory];
+  if (descriptor == nil || directory == nil) return nil;
+  NSURL *url = [directory URLByAppendingPathComponent:descriptor[@"file"]];
+  NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:nil];
+  if (![attributes[NSFileType] isEqual:NSFileTypeRegular]) return nil;
+  if ([attributes[NSFileSize] unsignedLongLongValue] < DSHCliMinimumBytes) return nil;
+  return url;
+}
+
+- (NSDictionary *)installSnapshotForHarness:(NSString *)harnessId {
+  BOOL present = [DSHHarnessAuthService installedCliURLForHarness:harnessId] != nil;
+  @synchronized (self) {
+    NSDictionary *state = self.installState[harnessId];
+    NSString *phase = present ? @"ready"
+        : ([state[@"phase"] isKindOfClass:NSString.class] ? state[@"phase"] : @"idle");
+    NSMutableDictionary *snapshot = [@{ @"phase": phase } mutableCopy];
+    if ([state[@"fraction"] isKindOfClass:NSNumber.class]) snapshot[@"fraction"] = state[@"fraction"];
+    if ([state[@"error_code"] isKindOfClass:NSString.class] && [phase isEqual:@"failed"]) {
+      snapshot[@"error_code"] = state[@"error_code"];
+    }
+    return snapshot;
+  }
+}
+
+- (void)setInstallPhase:(NSString *)phase
+               fraction:(NSNumber *)fraction
+              errorCode:(NSString *)errorCode
+             forHarness:(NSString *)harnessId {
+  @synchronized (self) {
+    NSMutableDictionary *state = self.installState[harnessId] ?: [NSMutableDictionary dictionary];
+    state[@"phase"] = phase;
+    if (fraction != nil) state[@"fraction"] = fraction; else [state removeObjectForKey:@"fraction"];
+    if (errorCode != nil) state[@"error_code"] = errorCode; else [state removeObjectForKey:@"error_code"];
+    self.installState[harnessId] = state;
+  }
+}
+
+/// Begins a host-side download of the harness CLI. Idempotent: an install that
+/// is already present or already running is left alone. Progress and the final
+/// phase are read back through statusForHarnessId.
+- (void)installCliForHarness:(NSString *)harnessId {
+  NSDictionary *descriptor = [DSHHarnessAuthService cliDescriptorForHarness:harnessId];
+  if (descriptor == nil) return;
+  if ([DSHHarnessAuthService installedCliURLForHarness:harnessId] != nil) {
+    [self setInstallPhase:@"ready" fraction:nil errorCode:nil forHarness:harnessId];
+    return;
+  }
+  @synchronized (self) {
+    if (self.installTasks[harnessId] != nil) return;
+  }
+  NSURL *directory = [DSHHarnessAuthService cliDirectory];
+  if (directory == nil) {
+    [self setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_STORAGE_UNAVAILABLE"
+               forHarness:harnessId];
+    return;
+  }
+  [self setInstallPhase:@"downloading" fraction:@0 errorCode:nil forHarness:harnessId];
+  NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+  configuration.timeoutIntervalForResource = 1800;
+  NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration
+                                                        delegate:self
+                                                   delegateQueue:nil];
+  __weak DSHHarnessAuthService *weakSelf = self;
+  NSURL *target = [directory URLByAppendingPathComponent:descriptor[@"file"]];
+  NSURLSessionDownloadTask *task = [session downloadTaskWithURL:[NSURL URLWithString:descriptor[@"url"]]
+      completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+    DSHHarnessAuthService *strong = weakSelf;
+    if (strong == nil) return;
+    @synchronized (strong) { [strong.installTasks removeObjectForKey:harnessId]; }
+    NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+    if (error != nil || http == nil || http.statusCode < 200 || http.statusCode >= 300 || location == nil) {
+      [strong setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_DOWNLOAD_FAILED"
+                   forHarness:harnessId];
+      return;
+    }
+    NSFileManager *files = NSFileManager.defaultManager;
+    NSDictionary *attributes = [files attributesOfItemAtPath:location.path error:nil];
+    if ([attributes[NSFileSize] unsignedLongLongValue] < DSHCliMinimumBytes) {
+      [strong setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_DOWNLOAD_TRUNCATED"
+                   forHarness:harnessId];
+      return;
+    }
+    // Replace atomically: a half-written target must never look installed.
+    [files removeItemAtURL:target error:nil];
+    NSError *moveError = nil;
+    if (![files moveItemAtURL:location toURL:target error:&moveError]) {
+      [strong setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_STORE_FAILED"
+                   forHarness:harnessId];
+      return;
+    }
+    [files setAttributes:@{NSFileProtectionKey: NSFileProtectionComplete}
+            ofItemAtPath:target.path error:nil];
+    [strong setInstallPhase:@"ready" fraction:@1 errorCode:nil forHarness:harnessId];
+  }];
+  @synchronized (self) { self.installTasks[harnessId] = task; }
+  [task resume];
+}
+
+- (void)URLSession:(NSURLSession *)session
+              downloadTask:(NSURLSessionDownloadTask *)downloadTask
+              didWriteData:(int64_t)bytesWritten
+         totalBytesWritten:(int64_t)totalBytesWritten
+ totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
+  if (totalBytesExpectedToWrite <= 0) return;
+  double fraction = (double)totalBytesWritten / (double)totalBytesExpectedToWrite;
+  __block NSString *harness = nil;
+  @synchronized (self) {
+    for (NSString *key in self.installTasks) {
+      if (self.installTasks[key] == downloadTask) { harness = key; break; }
+    }
+  }
+  if (harness != nil) {
+    [self setInstallPhase:@"downloading" fraction:@(MIN(1.0, MAX(0.0, fraction)))
+                errorCode:nil forHarness:harness];
+  }
+}
+
 - (NSDictionary *)statusForHarnessId:(NSString *)harnessId {
   if ([harnessId isEqual:@"claude-code"]) {
     DSHClaudeOfficialSession *runner = [self validatedClaudeSession];
     if (runner != nil) return runner.status;
+    // No session yet means the CLI is not installed. Report unavailable with
+    // the install snapshot so the card offers the download and shows progress.
+    NSMutableDictionary *status = DSHAuthBaseStatus(harnessId,
+        DSHAuthRuntime(NO, nil, @"cli-not-installed"));
+    status[@"install"] = [self installSnapshotForHarness:harnessId];
+    return status;
   }
   if (!DSHAuthSupportedHarness(harnessId)) return @{};
-  // Codex sign-in is a host-side OAuth device flow over HTTPS -- no guest, no
-  // bundled CLI -- so nothing has to be present for it to run. Claude Code
-  // still has no wired transport.
+  // Codex signs in and chats host-side over HTTPS, so it needs no CLI and is
+  // available at once. (Claude returned earlier through its own session, which
+  // is gated on the CLI download.)
   BOOL available = [harnessId isEqualToString:DSHHarnessAuthHarnessCodex];
   NSString *reason = available ? nil : @"claude-original-auth-transport-unavailable";
   NSMutableDictionary *status = DSHAuthBaseStatus(
@@ -966,6 +1154,136 @@ static NSDictionary *DSHAuthStatusForActiveLogin(NSString *harnessId,
     if (changed) changed();
     [self finishAsync:completion status:[self statusForHarnessId:harnessId]];
   });
+}
+
+#pragma mark Guest CLI boot and install
+
+/// The shared kernel and initramfs the app ships and pins -- the same guest
+/// every runtime here boots. nil when the bundle is not the reviewed one.
+static NSDictionary *DSHAuthSharedGuestAssets(NSBundle *bundle) {
+  NSURL *kernel = [bundle URLForResource:DSHGuestKernelResourceName withExtension:nil];
+  NSURL *initrd = [bundle URLForResource:DSHGuestInitramfsResourceName withExtension:nil];
+  if (kernel == nil || initrd == nil) return nil;
+  if (![DSHAuthSHA256File(kernel) isEqualToString:DSHGuestKernelSha256] ||
+      ![DSHAuthSHA256File(initrd) isEqualToString:DSHGuestInitramfsSha256]) {
+    return nil;
+  }
+  return @{ @"kernel_url": kernel, @"initrd_url": initrd };
+}
+
+/// The persistent guest HOME image for a harness, created sparse on first use.
+/// Credentials the CLI writes and the installed CLI itself live here, so a
+/// login survives to the next one. nil only when it cannot be created.
++ (NSURL *)homeDiskURLForHarness:(NSString *)harnessId {
+  NSURL *directory = [self cliDirectory];
+  if (directory == nil) return nil;
+  NSString *name = [NSString stringWithFormat:@"%@-home.img",
+      [harnessId isEqualToString:DSHHarnessAuthHarnessCodex] ? @"codex" : @"claude"];
+  NSURL *disk = [directory URLByAppendingPathComponent:name];
+  NSFileManager *files = NSFileManager.defaultManager;
+  unsigned long long const bytes = 768ULL * 1024 * 1024;
+  NSDictionary *attributes = [files attributesOfItemAtPath:disk.path error:nil];
+  if ([attributes[NSFileType] isEqual:NSFileTypeRegular]) {
+    if ([attributes[NSFileSize] unsignedLongLongValue] == bytes) return disk;
+    [files removeItemAtURL:disk error:nil];
+  }
+  if (![files createFileAtPath:disk.path contents:nil
+                    attributes:@{NSFileProtectionKey: NSFileProtectionComplete}]) {
+    return nil;
+  }
+  NSFileHandle *handle = [NSFileHandle fileHandleForWritingToURL:disk error:nil];
+  if (handle == nil) return nil;
+  BOOL sized = [handle truncateAtOffset:bytes error:nil] && [handle closeAndReturnError:nil];
+  if (!sized) { [files removeItemAtURL:disk error:nil]; return nil; }
+  [disk setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+  return disk;
+}
+
+/// One synchronous guest command; nil on any transport failure. Not for the
+/// interactive login exec, which streams and takes stdin.
+static NSDictionary *DSHAuthGuestExec(void *session, NSArray<NSString *> *command,
+                                      NSUInteger timeoutMs) {
+  NSData *encoded = [NSJSONSerialization dataWithJSONObject:@{
+    @"protocol_version": @2, @"command": command,
+    @"timeout_ms": @(timeoutMs), @"max_output_bytes": @(256 * 1024),
+  } options:0 error:nil];
+  if (encoded == nil) return nil;
+  char *raw = rish_vm_session_exec_json(session, (const char *)encoded.bytes, encoded.length);
+  if (raw == NULL) return nil;
+  NSString *text = [NSString stringWithUTF8String:raw];
+  rish_string_free(raw);
+  if (text.length == 0 || text.length > 1024 * 1024) return nil;
+  return [NSJSONSerialization JSONObjectWithData:
+      [text dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+}
+
+/// Boots the guest with the persistent HOME disk and the downloaded CLI as a
+/// data disk, mounts HOME exec, and installs the CLI into it on first use.
+/// Returns a live session handle (fill *owner) or NULL with *errorCode set.
+/// Codex ships a tar.gz; Claude a raw binary -- both land at /mnt/harness/cli.
+- (void *)bootGuestForHarness:(NSString *)harnessId
+                        owner:(DSHGuestVMOwner **)ownerOut
+                    errorCode:(NSString **)errorCode {
+  NSDictionary *assets = DSHAuthSharedGuestAssets(self.bundle);
+  NSURL *cli = [DSHHarnessAuthService installedCliURLForHarness:harnessId];
+  NSURL *home = [DSHHarnessAuthService homeDiskURLForHarness:harnessId];
+  if (assets == nil) { if (errorCode) *errorCode = @"E_HARNESS_GUEST_ASSETS"; return NULL; }
+  if (cli == nil) { if (errorCode) *errorCode = @"E_HARNESS_CLI_NOT_INSTALLED"; return NULL; }
+  if (home == nil) { if (errorCode) *errorCode = @"E_HARNESS_CLI_STORAGE_UNAVAILABLE"; return NULL; }
+
+  DSHGuestVMOwner *owner = [DSHGuestRuntimeState.sharedState acquireGuestOwner];
+  if (owner == nil) { if (errorCode) *errorCode = @"E_GUEST_BUSY"; return NULL; }
+
+  NSDictionary *request = @{
+    @"kernel_path": [assets[@"kernel_url"] path],
+    @"initrd_path": [assets[@"initrd_url"] path],
+    @"root_disk_path": home.path,
+    @"data_disk_path": cli.path,
+    @"memory_mib": @1024,
+    @"network": @"user-nat",
+    @"command": @[],
+    @"command_line": @"console=ttyS0,115200n8 rdinit=/init panic=-1 oops=panic nokaslr "
+                     @"cgroup_no_v1=all 8250.nr_uarts=1",
+    @"boot_budget_units": @60000000000ULL,
+    @"handshake_budget_units": @40000000000ULL,
+  };
+  NSData *encoded = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
+  void *session = encoded == nil ? NULL
+      : rish_vm_boot_session((const char *)encoded.bytes, encoded.length);
+  if (session == NULL) {
+    [DSHGuestRuntimeState.sharedState releaseGuestOwner:owner];
+    if (errorCode) *errorCode = @"E_GUEST_BOOT_FAILED";
+    return NULL;
+  }
+  [DSHGuestRuntimeState.sharedState setGuestRuntimeMounted:YES owner:owner];
+
+  // Format the HOME disk only when it was just created (a fresh sparse image
+  // reads as zeros; a formatted one has a vfat signature). Mount it exec so the
+  // installed CLI runs in place, then install from /dev/vdb if not already there.
+  BOOL isCodex = [harnessId isEqualToString:DSHHarnessAuthHarnessCodex];
+  NSString *setup = [NSString stringWithFormat:
+      @"set -e; ip link set lo up;"
+      @" if ! blkid /dev/vda >/dev/null 2>&1; then mkfs.vfat /dev/vda >/dev/null 2>&1; fi;"
+      @" mkdir -p /mnt/harness;"
+      @" mount -t vfat -o umask=0022 /dev/vda /mnt/harness;"
+      @" mkdir -p /mnt/harness/home /mnt/harness/cli;"
+      @" if [ ! -x /mnt/harness/cli/%@ ]; then%@ chmod 0755 /mnt/harness/cli/%@; fi;"
+      @" test -x /mnt/harness/cli/%@",
+      isCodex ? @"codex" : @"claude",
+      isCodex ? @" tar -xzf /dev/vdb -C /mnt/harness/cli;"
+                @" if [ ! -e /mnt/harness/cli/codex ]; then mv /mnt/harness/cli/codex-* /mnt/harness/cli/codex; fi;"
+              : @" dd if=/dev/vdb of=/mnt/harness/cli/claude bs=1M 2>/dev/null;",
+      isCodex ? @"codex" : @"claude",
+      isCodex ? @"codex" : @"claude"];
+  NSDictionary *reply = DSHAuthGuestExec(session, @[ @"sh", @"-lc", setup ], 600000);
+  if (![reply[@"exit_code"] isEqual:@0]) {
+    rish_vm_session_free(session);
+    [DSHGuestRuntimeState.sharedState releaseGuestOwner:owner];
+    if (errorCode) *errorCode = @"E_HARNESS_CLI_INSTALL_FAILED";
+    return NULL;
+  }
+  if (ownerOut) *ownerOut = owner;
+  return session;
 }
 
 - (void)runCodexLoginForSession:(NSString *)sessionId generation:(NSUInteger)generation {

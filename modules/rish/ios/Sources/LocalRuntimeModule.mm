@@ -2666,6 +2666,18 @@ RCT_REMAP_METHOD(startHarnessLogin,
   [self.harnessAuthService startLoginForHarnessId:harness completion:resolve];
 }
 
+RCT_REMAP_METHOD(installHarnessCli,
+                 installHarnessCliForHarness:(NSString *)harness
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  if (!DSHIsHarnessAuthProvider(harness)) {
+    reject(@"E_HARNESS_AUTH_INVALID_HARNESS", @"Unknown official CLI harness", nil);
+    return;
+  }
+  [self.harnessAuthService installCliForHarness:harness];
+  resolve([self.harnessAuthService statusForHarnessId:harness]);
+}
+
 RCT_REMAP_METHOD(cancelHarnessLogin,
                  cancelHarnessLoginForHarness:(NSString *)harness
                  sessionId:(NSString *)sessionId
