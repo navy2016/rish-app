@@ -8,6 +8,8 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
 import org.json.JSONArray
 import org.json.JSONObject
+import tech.zseven.rish.runtime.AndroidRuntimeState
+import tech.zseven.rish.runtime.AndroidWorkspaceRegistry
 import tech.zseven.rish.runtime.AndroidWorkspaceStore
 import tech.zseven.rish.runtime.RuntimeJson
 import tech.zseven.rish.runtime.WorkspaceFailure
@@ -17,13 +19,19 @@ import tech.zseven.rish.runtime.WorkspaceFailure
  *
  * Mirrors modules/rish/ios/Sources/LocalWorkspaceModule.mm and the JS wrapper
  * in apps/mobile/src/native/LocalWorkspace.ts. Every request carries the
- * opaque root reference; the store refuses a stale binding and any path that
- * escapes the workspace before touching a file.
+ * opaque root reference; a stale binding and any path that escapes the
+ * workspace are refused before a file is touched.
+ *
+ * The root resolves through the shared registry first, because that is the
+ * workspace a bind produces now; records the fork itself wrote before the
+ * registry existed still answer from the store, so an older folder stays
+ * readable.
  */
 class LocalWorkspaceModule(private val react: ReactApplicationContext) :
     ReactContextBaseJavaModule(react) {
 
     private val store = AndroidWorkspaceStore.get(react)
+    private val runtime = AndroidRuntimeState.get(react)
 
     override fun getName(): String = "LocalWorkspace"
     override fun getConstants(): MutableMap<String, Any> = mutableMapOf("implemented" to true)
@@ -130,12 +138,34 @@ class LocalWorkspaceModule(private val react: ReactApplicationContext) :
         if (projectId != null && !AndroidWorkspaceStore.isUuid(projectId)) {
             throw WorkspaceFailure("E_WORKSPACE_INVALID", "Workspace request is invalid.")
         }
-        val record = store.find(id)
         val revision = root.opt("binding_revision")
         val expected = when (revision) {
             is Number -> revision.toLong()
             else -> throw WorkspaceFailure("E_WORKSPACE_INVALID", "Workspace request is invalid.")
         }
+        // A workspace the shared registry holds is the one a bind produces.
+        // Its record carries the revision the caller expects, and the registry
+        // proves the directory before any file operation runs.
+        val registryRecord = try {
+            runtime.workspaces.list().firstOrNull { it.optString("workspace_id") == id }
+        } catch (refused: AndroidWorkspaceRegistry.Refused) {
+            throw WorkspaceFailure(refused.code, "Workspace registry refused the request.")
+        }
+        if (registryRecord != null) {
+            val registryRevision = registryRecord.optInt("binding_revision", -1).toLong()
+            if (registryRevision != expected) {
+                throw WorkspaceFailure("E_WORKSPACE_REVISION_STALE", "Workspace binding is stale.")
+            }
+            val registryRoot = try {
+                runtime.workspaces.rootFor(id)
+            } catch (_: AndroidWorkspaceRegistry.Refused) {
+                null
+            } ?: throw WorkspaceFailure("E_WORKSPACE_UNAVAILABLE", "Workspace is unavailable.")
+            return AndroidWorkspaceStore.recordForRegistryWorkspace(id, registryRevision, registryRoot)
+        }
+        // Otherwise a record this device already holds — a folder the fork
+        // imported before the registry existed.
+        val record = store.find(id)
         if (record.revision != expected) throw WorkspaceFailure("E_WORKSPACE_REVISION_STALE", "Workspace binding is stale.")
         if (record.status != "ok") throw WorkspaceFailure("E_WORKSPACE_UNAVAILABLE", "Workspace is unavailable.")
         return record

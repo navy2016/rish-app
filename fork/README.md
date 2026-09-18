@@ -35,12 +35,22 @@ stage the guest runtime before any Gradle step.
 | --- | --- |
 | `apps/mobile/android/app/src/main/java/tech/zseven/rish/modules/LocalRuntimeModule.kt` | upstream lacks `bootstrapForHarness` (the JS runtime probe needs it for every non-dsh harness) and its rejections drop the HTTP status; the overlay adds both, no other behaviour change |
 | `apps/mobile/android/app/src/main/java/tech/zseven/rish/modules/LocalMirrorsModule.kt` | upstream still rejects every call; the fork stages the mirror overlay for real |
-| `.../modules/LocalWorkspaceModule.kt` | upstream placeholder; the fork serves file operations (list/read/write/mkdir/rename/trash/restore/portable tools) |
-| `.../modules/LocalWorkspacesModule.kt` | upstream placeholder; the fork registers workspaces and drives the system folder picker (SAF) |
-| `.../runtime/AndroidWorkspaceStore.kt` | the fork's workspace authority + storage layer used by the three modules above |
+| `.../modules/LocalWorkspaceModule.kt` | upstream placeholder; the fork serves bounded file operations (list/read/write/mkdir/rename/trash/restore/portable tools) over the shared registry's proven root, with a fallback to folders the fork imported before the registry existed |
+| `.../runtime/AndroidWorkspaceStore.kt` | the fork's file-operation engine; it also answers records the fork created before the shared registry existed |
 | `scripts/prepare-rish-agent-core-android.sh` | upstream hardcodes arm64-v8a; the overlay accepts `RISH_ANDROID_ABIS=x86_64` (same contract as `prepare-rish-android.sh`) so the smoke emulator stages a core and its session acceptance runs against the real core |
 | `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidWorkspaceStoreTest.kt` | device acceptance test run by the smoke workflow |
 | `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidRuntimeBootstrapTest.kt` | device acceptance test for the runtime probe (`bootstrapForHarness`) run by the smoke workflow |
+| `apps/mobile/android/app/src/androidTest/java/tech/zseven/rish/AndroidWorkspaceBridgeTest.kt` | device acceptance test for the registry→store file bridge run by the smoke workflow |
+
+Upstream `fbc8413` (2026-09-17) made Android workspaces real: a shared
+`AndroidWorkspaceRegistry` sealed by the core, a `LocalWorkspacesModule` that
+answers create/list/resolve/queryOperation, and a root resolver that
+`LocalProjects.projectForWorkspaceV2` consults — which is what finally lets a
+person bind a workspace on Android. The fork therefore **deleted its
+`LocalWorkspacesModule` overlay** and no longer owns a workspace registry:
+choosing a folder outside the app stays refused (upstream has not built the
+Storage Access Framework side), and the Files surface resolves what a bind
+produced through the deleted module's replacement above.
 
 The smoke workflow's acceptance run also executes upstream's
 `AndroidRuntimeStoreTest` (session CAS persist/load/query — the chain the local

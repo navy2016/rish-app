@@ -48,6 +48,24 @@ internal class AndroidWorkspaceStore private constructor(private val context: Co
         }
 
         fun isUuid(value: String?): Boolean = value != null && UUID_PATTERN.matches(value)
+
+        /**
+         * The record file operations run against for a workspace the shared
+         * registry holds. The registry proves the directory; the store only
+         * needs a root to run its bounded file operations inside, so nothing
+         * here consults the fork's own record list.
+         */
+        fun recordForRegistryWorkspace(id: String, revision: Long, root: File): Record = Record(
+            id = id,
+            displayName = root.name,
+            origin = "rish_created",
+            status = "ok",
+            revision = revision,
+            createdAt = "",
+            lastOpenedAt = "",
+            rootPath = root.absolutePath,
+            treeUri = null,
+        )
     }
 
     data class Record(
